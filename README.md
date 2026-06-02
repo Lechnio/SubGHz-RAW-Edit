@@ -11,6 +11,33 @@ a long recording full of repeats and noise becomes a single tidy frame.
 > **Receive/analysis only.** This app never transmits. It only reads, displays
 > and rewrites files you already have on the SD card.
 
+## Screenshots
+
+Zooming from the full activity envelope all the way down to individual pulses,
+then a trimmed single frame decoding cleanly as the original remote:
+
+| Envelope (zoomed out) |
+|:---:|
+| ![envelope](docs/images/02-envelope.png) |
+
+| Zooming in | Zooming in (deeper) | Square wave (maxium deep) |
+|:---:|:---:|:---:|
+| ![envelope](docs/images/03-zoom-mid.png) | ![zooming in](docs/images/04-zoom-closer.png) | ![waveform](docs/images/05-waveform.png) |
+
+A frame trimmed with this app, decoded back by the Flipper's Sub-GHz reader:
+| Decoded original | Decoded middle frame (trimmed) |
+|:---:|:---:|
+| ![decoded as Elmes Poland](docs/images/01-decoded-elmes.png) | ![decoded as Elmes Poland](docs/images/06-trimmed-single.png) |
+
+> **A note on this example.** The capture shown here decodes fine on its own —
+> several consecutive frames that the Flipper recognises and can save directly,
+> so there's no real need to crop it. It's used here only because it's a
+> familiar, easy-to-read signal that makes the tool's behaviour obvious. The
+> app earns its keep on the captures that *don't* decode automatically: a frame
+> buried in noise, a recording with several different signals in it, or a burst
+> you want to isolate down to a single clean copy before analysing or
+> replaying it.
+
 ---
 
 ## Why
