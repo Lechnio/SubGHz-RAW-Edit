@@ -647,6 +647,17 @@ static void draw_cb(Canvas *c, void *ctx)
         }
     }
 
+    int xa = time_to_x(a, a->marker_a);
+    int xb = time_to_x(a, a->marker_b);
+    int xlo = xa < xb ? xa : xb;
+    int xhi = xa < xb ? xb : xa;
+    if (xlo < 0)
+        xlo = 0;
+    if (xhi > 127)
+        xhi = 127;
+    for (int x = xlo; x <= xhi; x += 2)
+        canvas_draw_dot(c, x, WAVE_TOP - 1);
+
     draw_marker(c, time_to_x(a, a->marker_a), a->active == 0);
     draw_marker(c, time_to_x(a, a->marker_b), a->active == 1);
 
