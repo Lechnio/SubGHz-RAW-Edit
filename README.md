@@ -1,3 +1,5 @@
+https://github.com/user-attachments/assets/73021430-f114-46d3-9369-5ae309110ff5
+
 # SubGHz .sub RAW Files Editor for Flipper Zero
 
 A tiny on-device waveform editor for **Flipper Zero** that trims RAW `.sub`
