@@ -1,8 +1,8 @@
 App(
-    appid="subghz_trim",
-    name="SubGHz RAW Trim",
+    appid="subghz_raw_edit",
+    name="SubGHz RAW Edit",
     apptype=FlipperAppType.EXTERNAL,
-    entry_point="subghz_trim_app",
+    entry_point="subghz_raw_edit_app",
     stack_size=2 * 1024,
     fap_category="Sub-GHz",
     fap_author="you",

@@ -1,4 +1,4 @@
-# SubGHz Trim for Flipper Zero
+# SubGHz .sub RAW Files Editor for Flipper Zero
 
 A tiny on-device waveform editor for **Flipper Zero** that trims RAW `.sub`
 captures down to just the part you care about. Open a recording, let the app
@@ -93,11 +93,11 @@ Works with the official firmware, Momentum, Unleashed and other forks.
 
 ```bash
 # copy the folder into the firmware sources
-cp -r subghz_trim <firmware>/applications_user/subghz_trim
+cp -r subghz_raw_edit <firmware>/applications_user/subghz_raw_edit
 
 cd <firmware>
-./fbt fap_subghz_trim
-# result: build/latest/.extapps/subghz_trim.fap
+./fbt fap_subghz_raw_edit
+# result: build/latest/.extapps/subghz_raw_edit.fap
 ```
 
 Build it from the **same firmware tree** that's flashed on your Flipper,
@@ -106,7 +106,7 @@ otherwise you'll get an "Outdated app" / API mismatch error.
 Build and run on a connected device in one step:
 
 ```bash
-./fbt launch APPSRC=applications_user/subghz_trim
+./fbt launch APPSRC=applications_user/subghz_raw_edit
 ```
 
 ### With ufbt (standalone, no firmware tree)
@@ -114,19 +114,19 @@ Build and run on a connected device in one step:
 ```bash
 pip install --upgrade ufbt
 ufbt update --channel=release        # or point at your fork's SDK
-# from the subghz_trim/ folder:
-ufbt                                 # builds dist/subghz_trim.fap
+# from the subghz_raw_edit/ folder:
+ufbt                                 # builds dist/subghz_raw_edit.fap
 ufbt launch                          # builds + uploads + runs
 ```
 
 ### Manual install
 
-Copy the built `subghz_trim.fap` onto the SD card at `/ext/apps/Sub-GHz/` and
+Copy the built `subghz_raw_edit.fap` onto the SD card at `/ext/apps/Sub-GHz/` and
 launch it from **Apps -> Sub-GHz** on the Flipper.
 
 ## Usage
 
-1. Launch **SubGHz RAW Trim** from *Apps -> Sub-GHz*.
+1. Launch **SubGHz RAW Edit** from *Apps -> Sub-GHz*.
 2. Pick a RAW `.sub` file from `/ext/subghz`.
 3. The view opens centered on the detected frame. Zoom out (Down) to see the
    whole signal, zoom in (Up) to see individual pulses.

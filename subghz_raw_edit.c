@@ -1,6 +1,6 @@
 /*
- * SubGHz RAW Trim — a tiny waveform editor for Flipper Zero RAW .sub captures.
- * https://github.com/Lechnio/SubGHz-Raw-Trim
+ * SubGHz RAW Edit — a tiny waveform editor for Flipper Zero RAW .sub captures.
+ * https://github.com/Lechnio/SubGHz-RAW-Edit
  */
 
 #include <furi.h>
@@ -8,6 +8,9 @@
 #include <input/input.h>
 #include <storage/storage.h>
 #include <dialogs/dialogs.h>
+#include <gui/view_dispatcher.h>
+#include <gui/modules/submenu.h>
+#include <gui/modules/widget.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -16,6 +19,9 @@
 #define SUBGHZ_DIR "/ext/subghz"
 #define MAX_SAMPLES 24000
 #define DUR_CLAMP 32000
+
+#define APP_VERSION "1.0"
+#define APP_REPO "github.com/Lechnio/SubGHz-RAW-Edit"
 
 #define WAVE_TOP 17
 #define WAVE_BOT 50
@@ -704,16 +710,11 @@ static void zoom(App *a, bool in)
     clamp_view(a);
 }
 
-int32_t subghz_trim_app(void *p)
+static void run_editor(Storage *storage, DialogsApp *dialogs)
 {
-    UNUSED(p);
-
     App *app = malloc(sizeof(App));
     memset(app, 0, sizeof(App));
     app->mutex = furi_mutex_alloc(FuriMutexTypeNormal);
-
-    Storage *storage = furi_record_open(RECORD_STORAGE);
-    DialogsApp *dialogs = furi_record_open(RECORD_DIALOGS);
 
     FuriString *path = furi_string_alloc_set(SUBGHZ_DIR);
     DialogsFileBrowserOptions br;
@@ -754,18 +755,21 @@ int32_t subghz_trim_app(void *p)
 
     if (!loaded)
     {
-        DialogMessage *m = dialog_message_alloc();
-        dialog_message_set_header(m, "SubGHz RAW Trim", 64, 4, AlignCenter, AlignTop);
-        dialog_message_set_text(
-            m,
-            picked ? "Not a RAW capture\nor file is empty" : "No file selected",
-            64,
-            32,
-            AlignCenter,
-            AlignCenter);
-        dialog_message_set_buttons(m, NULL, NULL, "OK");
-        dialog_message_show(dialogs, m);
-        dialog_message_free(m);
+        if (picked)
+        {
+            DialogMessage *m = dialog_message_alloc();
+            dialog_message_set_header(m, "SubGHz RAW Edit", 64, 4, AlignCenter, AlignTop);
+            dialog_message_set_text(
+                m,
+                "Not a RAW capture\nor file is empty",
+                64,
+                32,
+                AlignCenter,
+                AlignCenter);
+            dialog_message_set_buttons(m, NULL, NULL, "OK");
+            dialog_message_show(dialogs, m);
+            dialog_message_free(m);
+        }
         goto cleanup;
     }
 
@@ -872,14 +876,145 @@ int32_t subghz_trim_app(void *p)
 
 cleanup:
     furi_string_free(path);
-    furi_record_close(RECORD_DIALOGS);
-    furi_record_close(RECORD_STORAGE);
 
     if (app->sd.data)
         free(app->sd.data);
 
     furi_mutex_free(app->mutex);
     free(app);
+}
 
+typedef enum
+{
+    MenuViewSubmenu,
+    MenuViewAbout,
+} MenuViewId;
+
+typedef enum
+{
+    MenuItemSelectFile,
+    MenuItemAbout,
+} MenuItemId;
+
+typedef struct
+{
+    ViewDispatcher *view_dispatcher;
+    Submenu *submenu;
+    Widget *widget;
+    Storage *storage;
+    DialogsApp *dialogs;
+    bool launch_editor;
+} Menu;
+
+static void menu_submenu_cb(void *context, uint32_t index)
+{
+    Menu *menu = context;
+    if (index == MenuItemSelectFile)
+    {
+        menu->launch_editor = true;
+        view_dispatcher_stop(menu->view_dispatcher);
+    }
+    else if (index == MenuItemAbout)
+    {
+        view_dispatcher_switch_to_view(menu->view_dispatcher, MenuViewAbout);
+    }
+}
+
+static uint32_t about_back_cb(void *context)
+{
+    UNUSED(context);
+    return MenuViewSubmenu;
+}
+
+static uint32_t submenu_back_cb(void *context)
+{
+    UNUSED(context);
+    return VIEW_NONE;
+}
+
+static void menu_build_about(Menu *menu)
+{
+    widget_add_text_scroll_element(
+        menu->widget,
+        0,
+        0,
+        128,
+        64,
+        "\e#SubGHz RAW Edit\e#\n"
+        "Version " APP_VERSION "\n"
+        "\n"
+        "Trim recorded RAW .sub\n"
+        "captures down to a single\n"
+        "clean frame, right on the\n"
+        "Flipper. Auto-finds the\n"
+        "signal, zoom in/out, set\n"
+        "A/B and save.\n"
+        "\n"
+        "RX/analysis only - never\n"
+        "transmits.\n"
+        "\n"
+        "by Lechnio\n" APP_REPO "\n");
+}
+
+int32_t subghz_raw_edit_app(void *p)
+{
+    UNUSED(p);
+
+    Menu *menu = malloc(sizeof(Menu));
+    memset(menu, 0, sizeof(Menu));
+
+    menu->storage = furi_record_open(RECORD_STORAGE);
+    menu->dialogs = furi_record_open(RECORD_DIALOGS);
+    Gui *gui = furi_record_open(RECORD_GUI);
+
+    menu->view_dispatcher = view_dispatcher_alloc();
+    menu->submenu = submenu_alloc();
+    menu->widget = widget_alloc();
+
+    submenu_set_header(menu->submenu, "SubGHz RAW Edit");
+    submenu_add_item(
+        menu->submenu, "Select .sub file", MenuItemSelectFile, menu_submenu_cb, menu);
+    submenu_add_item(menu->submenu, "About", MenuItemAbout, menu_submenu_cb, menu);
+
+    menu_build_about(menu);
+
+    view_set_previous_callback(submenu_get_view(menu->submenu), submenu_back_cb);
+    view_set_previous_callback(widget_get_view(menu->widget), about_back_cb);
+
+    view_dispatcher_attach_to_gui(
+        menu->view_dispatcher, gui, ViewDispatcherTypeFullscreen);
+    view_dispatcher_add_view(
+        menu->view_dispatcher, MenuViewSubmenu, submenu_get_view(menu->submenu));
+    view_dispatcher_add_view(
+        menu->view_dispatcher, MenuViewAbout, widget_get_view(menu->widget));
+
+    bool running = true;
+    while (running)
+    {
+        menu->launch_editor = false;
+        view_dispatcher_switch_to_view(menu->view_dispatcher, MenuViewSubmenu);
+        view_dispatcher_run(menu->view_dispatcher);
+
+        if (menu->launch_editor)
+        {
+            run_editor(menu->storage, menu->dialogs);
+        }
+        else
+        {
+            running = false;
+        }
+    }
+
+    view_dispatcher_remove_view(menu->view_dispatcher, MenuViewSubmenu);
+    view_dispatcher_remove_view(menu->view_dispatcher, MenuViewAbout);
+    submenu_free(menu->submenu);
+    widget_free(menu->widget);
+    view_dispatcher_free(menu->view_dispatcher);
+
+    furi_record_close(RECORD_GUI);
+    furi_record_close(RECORD_DIALOGS);
+    furi_record_close(RECORD_STORAGE);
+
+    free(menu);
     return 0;
 }
