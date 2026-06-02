@@ -1,4 +1,4 @@
-https://github.com/user-attachments/assets/73021430-f114-46d3-9369-5ae309110ff5
+https://github.com/user-attachments/assets/364dd228-55be-410a-bbef-03b2faa2bac2
 
 # Sub-GHz .sub RAW Files Editor for Flipper Zero
 

@@ -20,7 +20,7 @@
 #define MAX_SAMPLES 24000
 #define DUR_CLAMP 32000
 
-#define APP_VERSION "1.0"
+#define APP_VERSION "1.1"
 #define APP_REPO "github.com/Lechnio/SubGHz-RAW-Edit"
 
 #define WAVE_TOP 17
