@@ -493,10 +493,28 @@ static bool do_save(Storage *st, App *a)
     }
 
     FuriString *path = furi_string_alloc();
-    furi_string_printf(path, "%s/%s_trim.sub", SUBGHZ_DIR, a->basename);
+    char savename[64];
+    int suffix = 0;
+    while (true)
+    {
+        if (suffix == 0)
+            snprintf(savename, sizeof(savename), "%s_trim", a->basename);
+        else
+            snprintf(savename, sizeof(savename), "%s_trim%d", a->basename, suffix);
+        furi_string_printf(path, "%s/%s.sub", SUBGHZ_DIR, savename);
+        if (!storage_file_exists(st, furi_string_get_cstr(path)))
+            break;
+        suffix++;
+        if (suffix > 999)
+        {
+            furi_string_free(path);
+            snprintf(a->status, sizeof(a->status), "Too many trims");
+            return false;
+        }
+    }
 
     File *f = storage_file_alloc(st);
-    if (!storage_file_open(f, furi_string_get_cstr(path), FSAM_WRITE, FSOM_CREATE_ALWAYS))
+    if (!storage_file_open(f, furi_string_get_cstr(path), FSAM_WRITE, FSOM_CREATE_NEW))
     {
         storage_file_free(f);
         furi_string_free(path);
@@ -539,7 +557,7 @@ static bool do_save(Storage *st, App *a)
     storage_file_close(f);
     storage_file_free(f);
 
-    snprintf(a->status, sizeof(a->status), "Saved _trim.sub OK");
+    snprintf(a->status, sizeof(a->status), "Saved %s.sub", savename);
     furi_string_free(path);
     return true;
 }
@@ -688,10 +706,20 @@ static void draw_cb(Canvas *c, void *ctx)
     {
         int w = 124;
         canvas_set_color(c, ColorWhite);
-        canvas_draw_box(c, 2, 26, w, 14);
+        canvas_draw_box(c, 2, 22, w, 22);
         canvas_set_color(c, ColorBlack);
-        canvas_draw_frame(c, 2, 26, w, 14);
-        canvas_draw_str_aligned(c, 64, 33, AlignCenter, AlignCenter, a->status);
+        canvas_draw_frame(c, 2, 22, w, 22);
+
+        const char *msg = a->status;
+        if (strncmp(msg, "Saved ", 6) == 0)
+        {
+            canvas_draw_str_aligned(c, 64, 29, AlignCenter, AlignCenter, "Saved");
+            canvas_draw_str_aligned(c, 64, 38, AlignCenter, AlignCenter, msg + 6);
+        }
+        else
+        {
+            canvas_draw_str_aligned(c, 64, 33, AlignCenter, AlignCenter, msg);
+        }
     }
 
     furi_mutex_release(a->mutex);

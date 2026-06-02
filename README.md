@@ -135,7 +135,8 @@ launch it from **Apps -> Sub-GHz** on the Flipper.
 4. Place **A** at the start of one clean frame, press OK, place **B** at the
    end.
 5. Hold **OK** to save. The trimmed copy is written to
-   `/ext/subghz/<name>_trim.sub`.
+   `/ext/subghz/<name>_trim.sub`. If that name is taken, the next free number
+   is used (`_trim1`, `_trim2`, ...), so saves never overwrite an earlier trim.
 
 ## File format
 
