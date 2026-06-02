@@ -1,6 +1,6 @@
 https://github.com/user-attachments/assets/73021430-f114-46d3-9369-5ae309110ff5
 
-# SubGHz .sub RAW Files Editor for Flipper Zero
+# Sub-GHz .sub RAW Files Editor for Flipper Zero
 
 A tiny on-device waveform editor for **Flipper Zero** that trims RAW `.sub`
 captures down to just the part you care about. Open a recording, let the app
@@ -128,7 +128,7 @@ launch it from **Apps -> Sub-GHz** on the Flipper.
 
 ## Usage
 
-1. Launch **SubGHz RAW Edit** from *Apps -> Sub-GHz*.
+1. Launch **Sub-GHz RAW Edit** from *Apps -> Sub-GHz*.
 2. Pick a RAW `.sub` file from `/ext/subghz`.
 3. The view opens centered on the detected frame. Zoom out (Down) to see the
    whole signal, zoom in (Up) to see individual pulses.

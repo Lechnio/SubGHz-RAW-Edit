@@ -1,6 +1,6 @@
 App(
     appid="subghz_raw_edit",
-    name="SubGHz RAW Edit",
+    name="Sub-GHz RAW Edit",
     apptype=FlipperAppType.EXTERNAL,
     entry_point="subghz_raw_edit_app",
     stack_size=2 * 1024,

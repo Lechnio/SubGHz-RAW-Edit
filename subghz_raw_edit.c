@@ -1,5 +1,5 @@
 /*
- * SubGHz RAW Edit — a tiny waveform editor for Flipper Zero RAW .sub captures.
+ * Sub-GHz RAW Edit — a tiny waveform editor for Flipper Zero RAW .sub captures.
  * https://github.com/Lechnio/SubGHz-RAW-Edit
  */
 
@@ -758,7 +758,7 @@ static void run_editor(Storage *storage, DialogsApp *dialogs)
         if (picked)
         {
             DialogMessage *m = dialog_message_alloc();
-            dialog_message_set_header(m, "SubGHz RAW Edit", 64, 4, AlignCenter, AlignTop);
+            dialog_message_set_header(m, "Sub-GHz RAW Edit", 64, 4, AlignCenter, AlignTop);
             dialog_message_set_text(
                 m,
                 "Not a RAW capture\nor file is empty",
@@ -940,7 +940,7 @@ static void menu_build_about(Menu *menu)
         0,
         128,
         64,
-        "\e#SubGHz RAW Edit\e#\n"
+        "\e#Sub-GHz RAW Edit\e#\n"
         "Version " APP_VERSION "\n"
         "\n"
         "Trim recorded RAW .sub\n"
@@ -971,7 +971,7 @@ int32_t subghz_raw_edit_app(void *p)
     menu->submenu = submenu_alloc();
     menu->widget = widget_alloc();
 
-    submenu_set_header(menu->submenu, "SubGHz RAW Edit");
+    submenu_set_header(menu->submenu, "Sub-GHz RAW Edit");
     submenu_add_item(
         menu->submenu, "Select .sub file", MenuItemSelectFile, menu_submenu_cb, menu);
     submenu_add_item(menu->submenu, "About", MenuItemAbout, menu_submenu_cb, menu);
