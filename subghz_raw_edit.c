@@ -628,28 +628,39 @@ static void draw_cb(Canvas *c, void *ctx)
 
     if (a->wave_mode)
     {
-        int32_t span = a->view_end - a->view_start;
-        if (span <= 0)
-            span = 1;
         int yhi = WAVE_TOP + 2;
         int ylo = WAVE_BOT - 2;
+
         int32_t run = 0;
-        size_t i = 0;
-        int prevy = ylo;
-        for (int x = 0; x < 128; x++)
+        int prev_x = -1;
+        int prev_y = ylo;
+        for (size_t i = 0; i < a->sd.count; i++)
         {
-            int32_t tx = a->view_start + (int32_t)(((int64_t)x * span) / 128);
-            while (i < a->sd.count && (run + iabs32(a->sd.data[i])) <= tx)
-            {
-                run += iabs32(a->sd.data[i]);
-                i++;
-            }
-            int level = (i < a->sd.count) ? (a->sd.data[i] > 0 ? 1 : 0) : 0;
-            int y = level ? yhi : ylo;
-            if (x > 0 && y != prevy)
-                canvas_draw_line(c, x, yhi, x, ylo);
-            canvas_draw_line(c, x, y, x, y);
-            prevy = y;
+            int32_t ad = iabs32(a->sd.data[i]);
+            int32_t t0 = run;
+            run += ad;
+            int32_t t1 = run;
+
+            if (t1 < a->view_start || t0 > a->view_end)
+                continue;
+
+            int x0 = time_to_x(a, t0);
+            int x1 = time_to_x(a, t1);
+            if (x0 < 0)
+                x0 = 0;
+            if (x1 > 127)
+                x1 = 127;
+
+            int y = (a->sd.data[i] > 0) ? yhi : ylo;
+
+            if (prev_x >= 0 && y != prev_y && x0 >= 0 && x0 <= 127)
+                canvas_draw_line(c, x0, yhi, x0, ylo);
+
+            if (x1 >= x0)
+                canvas_draw_line(c, x0, y, x1, y);
+
+            prev_x = x1;
+            prev_y = y;
         }
     }
     else
