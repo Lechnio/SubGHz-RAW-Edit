@@ -6,7 +6,7 @@ v1.1:
 - Highlight the selected A..B range with a dotted line along the top of the wave area
 - Auto-number saved trims to avoid overwriting, show saved filename
 
-v1.2 RC:
+v1.2:
 - Make A/B markers recompute its position correctly in the waveform mode.
 When the markers were aligned to a signal edge in the waveform mode,
 its possition relative to that edge changed while zooming in/out.
