@@ -10,3 +10,6 @@ v1.2:
 - Make A/B markers recompute its position correctly in the waveform mode.
 When the markers were aligned to a signal edge in the waveform mode,
 its possition relative to that edge changed while zooming in/out.
+
+v1.3:
+- Apply proper icons for listed .sub files.
