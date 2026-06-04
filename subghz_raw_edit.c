@@ -12,6 +12,8 @@
 #include <gui/modules/submenu.h>
 #include <gui/modules/widget.h>
 
+#include "subghz_raw_edit_icons.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -768,7 +770,7 @@ static void run_editor(Storage *storage, DialogsApp *dialogs)
 
     FuriString *path = furi_string_alloc_set(SUBGHZ_DIR);
     DialogsFileBrowserOptions br;
-    dialog_file_browser_set_basic_options(&br, ".sub", NULL);
+    dialog_file_browser_set_basic_options(&br, ".sub", &I_sub1_10px);
     br.base_path = SUBGHZ_DIR;
     bool picked = dialog_file_browser_show(dialogs, path, path, &br);
 
@@ -810,12 +812,7 @@ static void run_editor(Storage *storage, DialogsApp *dialogs)
             DialogMessage *m = dialog_message_alloc();
             dialog_message_set_header(m, "Sub-GHz RAW Edit", 64, 4, AlignCenter, AlignTop);
             dialog_message_set_text(
-                m,
-                "Not a RAW capture\nor file is empty",
-                64,
-                32,
-                AlignCenter,
-                AlignCenter);
+                m, "Not a RAW capture\nor file is empty", 64, 32, AlignCenter, AlignCenter);
             dialog_message_set_buttons(m, NULL, NULL, "OK");
             dialog_message_show(dialogs, m);
             dialog_message_free(m);
@@ -1022,8 +1019,7 @@ int32_t subghz_raw_edit_app(void *p)
     menu->widget = widget_alloc();
 
     submenu_set_header(menu->submenu, "Sub-GHz RAW Edit");
-    submenu_add_item(
-        menu->submenu, "Select .sub file", MenuItemSelectFile, menu_submenu_cb, menu);
+    submenu_add_item(menu->submenu, "Select .sub file", MenuItemSelectFile, menu_submenu_cb, menu);
     submenu_add_item(menu->submenu, "About", MenuItemAbout, menu_submenu_cb, menu);
 
     menu_build_about(menu);
@@ -1031,12 +1027,10 @@ int32_t subghz_raw_edit_app(void *p)
     view_set_previous_callback(submenu_get_view(menu->submenu), submenu_back_cb);
     view_set_previous_callback(widget_get_view(menu->widget), about_back_cb);
 
-    view_dispatcher_attach_to_gui(
-        menu->view_dispatcher, gui, ViewDispatcherTypeFullscreen);
+    view_dispatcher_attach_to_gui(menu->view_dispatcher, gui, ViewDispatcherTypeFullscreen);
     view_dispatcher_add_view(
         menu->view_dispatcher, MenuViewSubmenu, submenu_get_view(menu->submenu));
-    view_dispatcher_add_view(
-        menu->view_dispatcher, MenuViewAbout, widget_get_view(menu->widget));
+    view_dispatcher_add_view(menu->view_dispatcher, MenuViewAbout, widget_get_view(menu->widget));
 
     bool running = true;
     while (running)
