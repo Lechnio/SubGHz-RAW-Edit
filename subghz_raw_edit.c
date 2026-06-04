@@ -62,6 +62,8 @@ typedef struct
     char status[80];
     uint32_t status_until;
 
+    bool loading;
+
     FuriMutex *mutex;
 } App;
 
@@ -598,6 +600,17 @@ static void draw_cb(Canvas *c, void *ctx)
     canvas_set_color(c, ColorBlack);
     canvas_set_font(c, FontSecondary);
 
+    if (a->loading)
+    {
+        canvas_draw_str_aligned(c, 64, 28, AlignCenter, AlignCenter, "Loading...");
+        char ln[20];
+        strncpy(ln, a->basename, sizeof(ln) - 1);
+        ln[sizeof(ln) - 1] = '\0';
+        canvas_draw_str_aligned(c, 64, 40, AlignCenter, AlignCenter, ln);
+        furi_mutex_release(a->mutex);
+        return;
+    }
+
     char nm[14];
     strncpy(nm, a->basename, sizeof(nm) - 1);
     nm[sizeof(nm) - 1] = '\0';
@@ -774,8 +787,9 @@ static void run_editor(Storage *storage, DialogsApp *dialogs)
     br.base_path = SUBGHZ_DIR;
     bool picked = dialog_file_browser_show(dialogs, path, path, &br);
 
-    bool loaded = false;
-    if (picked)
+    if (!picked)
+        goto cleanup;
+
     {
         const char *full = furi_string_get_cstr(path);
         const char *slash = strrchr(full, '/');
@@ -784,52 +798,56 @@ static void run_editor(Storage *storage, DialogsApp *dialogs)
         char *dot = strrchr(app->basename, '.');
         if (dot)
             *dot = '\0';
-
-        loaded = load_sub(storage, full, &app->sd);
     }
-
-    if (app->sd.out_of_memory)
-    {
-        DialogMessage *m = dialog_message_alloc();
-        dialog_message_set_header(m, "Out of memory", 64, 2, AlignCenter, AlignTop);
-        dialog_message_set_text(
-            m,
-            "Not enough free RAM to\nload this capture.\nReboot Flipper, then\nopen the app first.",
-            64,
-            34,
-            AlignCenter,
-            AlignCenter);
-        dialog_message_set_buttons(m, NULL, NULL, "OK");
-        dialog_message_show(dialogs, m);
-        dialog_message_free(m);
-        goto cleanup;
-    }
-
-    if (!loaded)
-    {
-        if (picked)
-        {
-            DialogMessage *m = dialog_message_alloc();
-            dialog_message_set_header(m, "Sub-GHz RAW Edit", 64, 4, AlignCenter, AlignTop);
-            dialog_message_set_text(
-                m, "Not a RAW capture\nor file is empty", 64, 32, AlignCenter, AlignCenter);
-            dialog_message_set_buttons(m, NULL, NULL, "OK");
-            dialog_message_show(dialogs, m);
-            dialog_message_free(m);
-        }
-        goto cleanup;
-    }
-
-    auto_detect(app);
-    recompute_overview(app);
-    recompute_activity(app);
 
     Gui *gui = furi_record_open(RECORD_GUI);
     ViewPort *vp = view_port_alloc();
     FuriMessageQueue *queue = furi_message_queue_alloc(8, sizeof(InputEvent));
     view_port_draw_callback_set(vp, draw_cb, app);
     view_port_input_callback_set(vp, input_cb, queue);
+    app->loading = true;
     gui_add_view_port(gui, vp, GuiLayerFullscreen);
+    view_port_update(vp);
+
+    bool loaded = load_sub(storage, furi_string_get_cstr(path), &app->sd);
+
+    if (app->sd.out_of_memory || !loaded)
+    {
+        gui_remove_view_port(gui, vp);
+        view_port_free(vp);
+        furi_message_queue_free(queue);
+        furi_record_close(RECORD_GUI);
+
+        DialogMessage *m = dialog_message_alloc();
+        if (app->sd.out_of_memory)
+        {
+            dialog_message_set_header(m, "Out of memory", 64, 2, AlignCenter, AlignTop);
+            dialog_message_set_text(
+                m,
+                "Not enough free RAM to\nload this capture.\nReboot Flipper, then\nopen the app first.",
+                64,
+                34,
+                AlignCenter,
+                AlignCenter);
+        }
+        else
+        {
+            dialog_message_set_header(m, "Sub-GHz RAW Edit", 64, 4, AlignCenter, AlignTop);
+            dialog_message_set_text(
+                m, "Not a RAW capture\nor file is empty", 64, 32, AlignCenter, AlignCenter);
+        }
+        dialog_message_set_buttons(m, NULL, NULL, "OK");
+        dialog_message_show(dialogs, m);
+        dialog_message_free(m);
+        goto cleanup;
+    }
+
+    app->loading = false;
+    auto_detect(app);
+    recompute_overview(app);
+    recompute_activity(app);
+    furi_message_queue_reset(queue);
+    view_port_update(vp);
 
     bool running = true;
     InputEvent e;
