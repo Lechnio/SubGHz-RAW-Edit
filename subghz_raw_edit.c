@@ -1305,6 +1305,7 @@ static void run_editor(Storage *storage, DialogsApp *dialogs)
                 if (e.key == InputKeyOk)
                 {
                     app->active ^= 1;
+                    ensure_visible(app, app->active ? app->marker_b : app->marker_a);
                     changed = true;
                 }
                 else if (e.key == InputKeyBack)
