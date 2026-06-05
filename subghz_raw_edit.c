@@ -87,6 +87,7 @@ typedef struct
     uint32_t status_until;
 
     bool loading;
+    bool saving;
 
     int mode;
     int menu_sel;
@@ -784,6 +785,13 @@ static void draw_cb(Canvas *c, void *ctx)
         return;
     }
 
+    if (a->saving)
+    {
+        canvas_draw_str_aligned(c, 64, 34, AlignCenter, AlignCenter, "Saving...");
+        furi_mutex_release(a->mutex);
+        return;
+    }
+
     char nm[15];
     strncpy(nm, a->basename, sizeof(nm) - 1);
     nm[sizeof(nm) - 1] = '\0';
@@ -1046,15 +1054,26 @@ static void prompt_and_save(Gui *gui, ViewPort *vp, FuriMessageQueue *queue, Sto
     gui_remove_view_port(gui, vp);
 
     bool ok = prompt_filename(gui, namebuf, sizeof(namebuf));
+
     if (ok && namebuf[0] != '\0')
+    {
+        a->saving = true;
+        gui_add_view_port(gui, vp, GuiLayerFullscreen);
+        view_port_update(vp);
+
         write_selection(st, a, namebuf);
+
+        a->saving = false;
+    }
     else
+    {
         snprintf(a->status, sizeof(a->status), "Cancelled");
+        gui_add_view_port(gui, vp, GuiLayerFullscreen);
+    }
 
     a->status_until = furi_get_tick() + 2000;
-
-    gui_add_view_port(gui, vp, GuiLayerFullscreen);
     furi_message_queue_reset(queue);
+    view_port_update(vp);
 }
 
 static void do_cut_action(Gui *gui, ViewPort *vp, FuriMessageQueue *queue, DialogsApp *dialogs, App *a)

@@ -192,6 +192,6 @@ RAW_Data: 257 -926 637 -526 ...
   even though it's nowhere near the time limit; a real frame is only a few hundred edges.
   The buffer holds ~24000 samples (signal edges) ≈ 47 KB of RAM — plenty for any
   real frame (a few hundred edges), but noise fills it in seconds. For example, an
-  `AM650` capture at 433.92 MHz in a noisy area hits the limit around a ~105 KB
-  25–30 s file. If you want to load longer RAWs just use AM270 which won't
+  `AM650` capture at `433.92` MHz in a noisy area hits the limit around a ~105 KB
+  25–30 s file. If you want to load longer RAWs just use `AM270` which won't
   that much noise.
