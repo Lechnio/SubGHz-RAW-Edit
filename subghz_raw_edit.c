@@ -24,7 +24,7 @@
 #define DUR_CLAMP 32000
 #define LOAD_HEAP_RESERVE 12288
 
-#define APP_VERSION "1.3"
+#define APP_VERSION "1.4"
 #define APP_REPO "github.com/Lechnio/SubGHz-RAW-Edit"
 
 #define SCREEN_W_PX 128
