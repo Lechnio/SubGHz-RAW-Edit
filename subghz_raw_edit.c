@@ -22,6 +22,7 @@
 #define SUBGHZ_DIR "/ext/subghz"
 #define MAX_SAMPLES 24000
 #define DUR_CLAMP 32000
+#define LOAD_HEAP_RESERVE 12288
 
 #define APP_VERSION "1.3"
 #define APP_REPO "github.com/Lechnio/SubGHz-RAW-Edit"
@@ -376,34 +377,10 @@ static bool lr_read_line(LineReader *lr, FuriString *out)
 
 static bool append_sample(SubData *sd, int32_t v)
 {
-    if (sd->count >= MAX_SAMPLES)
+    if (sd->count >= sd->cap)
     {
         sd->truncated = true;
         return false;
-    }
-
-    if (sd->count >= sd->cap)
-    {
-        size_t ncap = sd->cap + 2000;
-        if (ncap > MAX_SAMPLES)
-            ncap = MAX_SAMPLES;
-        size_t need = ncap * sizeof(int16_t);
-
-        if (memmgr_get_free_heap() < need + 8192)
-        {
-            sd->out_of_memory = true;
-            return false;
-        }
-
-        int16_t *nd = realloc(sd->data, need);
-        if (!nd)
-        {
-            sd->out_of_memory = true;
-            return false;
-        }
-
-        sd->data = nd;
-        sd->cap = ncap;
     }
 
     if (v > DUR_CLAMP)
@@ -428,6 +405,28 @@ static bool load_sub(Storage *storage, const char *path, SubData *sd)
         storage_file_free(f);
         return false;
     }
+
+    uint64_t fsize = storage_file_size(f);
+    size_t est = (size_t)(fsize / 2) + 16;
+    if (est > MAX_SAMPLES)
+        est = MAX_SAMPLES;
+    size_t need = est * sizeof(int16_t);
+    if (memmgr_get_free_heap() < need + LOAD_HEAP_RESERVE)
+    {
+        sd->out_of_memory = true;
+        storage_file_close(f);
+        storage_file_free(f);
+        return false;
+    }
+    sd->data = malloc(need);
+    if (!sd->data)
+    {
+        sd->out_of_memory = true;
+        storage_file_close(f);
+        storage_file_free(f);
+        return false;
+    }
+    sd->cap = est;
 
     LineReader lr = {.file = f, .len = 0, .pos = 0, .eof = false};
     FuriString *line = furi_string_alloc();
@@ -801,6 +800,8 @@ static void draw_cb(Canvas *c, void *ctx)
 
     char total_time_str[14];
     fmt_time(a->sd.total_us, total_time_str, sizeof(total_time_str));
+    if (a->sd.truncated)
+        strncat(total_time_str, "+", sizeof(total_time_str) - strlen(total_time_str) - 1);
     canvas_draw_str_aligned(c, SCREEN_W_PX - 1, FONT_SIZE_PX, AlignRight, AlignBottom, total_time_str);
 
     for (int x = 0; x < SCREEN_W_PX; x++)

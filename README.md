@@ -186,5 +186,12 @@ RAW_Data: 257 -926 637 -526 ...
   plenty in practice.
 - **Undo is one level deep.** Only the most recent cut can be reverted; a second
   cut replaces the snapshot of the first.
-- Times are 32-bit microseconds, so captures up to ~35 minutes are handled.
-
+- Note the two separate ceilings: ~35 minutes of time (microseconds in an int32_t)
+  and ~24000 samples (signal edges). They're independent - noise hits the sample
+  limit within seconds because it's a dense storm of edges,
+  even though it's nowhere near the time limit; a real frame is only a few hundred edges.
+  The buffer holds ~24000 samples (signal edges) ≈ 47 KB of RAM — plenty for any
+  real frame (a few hundred edges), but noise fills it in seconds. For example, an
+  `AM650` capture at 433.92 MHz in a noisy area hits the limit around a ~105 KB
+  25–30 s file. If you want to load longer RAWs just use AM270 which won't
+  that much noise.
