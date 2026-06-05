@@ -909,7 +909,12 @@ static void draw_cb(Canvas *c, void *ctx)
     if (len < 0)
         len = -len;
 
-    fmt_time(a->view_end - a->view_start, zb, sizeof(zb));
+    int32_t vis_lo = a->view_start < 0 ? 0 : a->view_start;
+    int32_t vis_hi = a->view_end > a->sd.total_us ? a->sd.total_us : a->view_end;
+    int32_t vis = vis_hi - vis_lo;
+    if (vis < 0)
+        vis = 0;
+    fmt_time(vis, zb, sizeof(zb));
     fmt_time(len, sl, sizeof(sl));
 
     char l1[SCREEN_W_PX / 4];
