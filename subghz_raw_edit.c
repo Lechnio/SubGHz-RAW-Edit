@@ -748,18 +748,9 @@ static bool cut_compact(App *a)
 
 static void draw_marker(Canvas *c, int x, bool active)
 {
-    if (x < 0)
-    {
-        canvas_draw_str_aligned(
-            c, 0, (WAVE_TOP + WAVE_BOT) / 2, AlignLeft, AlignCenter, "<");
+    if (x < 0 || x > SCREEN_W_PX - 1)
         return;
-    }
-    if (x > SCREEN_W_PX - 1)
-    {
-        canvas_draw_str_aligned(
-            c, SCREEN_W_PX - 1, (WAVE_TOP + WAVE_BOT) / 2, AlignRight, AlignCenter, ">");
-        return;
-    }
+
     if (active)
     {
         for (int y = WAVE_TOP; y <= WAVE_BOT; y++)
@@ -800,8 +791,6 @@ static void draw_cb(Canvas *c, void *ctx)
 
     char total_time_str[14];
     fmt_time(a->sd.total_us, total_time_str, sizeof(total_time_str));
-    if (a->sd.truncated)
-        strncat(total_time_str, "+", sizeof(total_time_str) - strlen(total_time_str) - 1);
     canvas_draw_str_aligned(c, SCREEN_W_PX - 1, FONT_SIZE_PX, AlignRight, AlignBottom, total_time_str);
 
     for (int x = 0; x < SCREEN_W_PX; x++)
@@ -897,6 +886,12 @@ static void draw_cb(Canvas *c, void *ctx)
 
     draw_marker(c, time_to_x(a, a->marker_a), a->active == 0);
     draw_marker(c, time_to_x(a, a->marker_b), a->active == 1);
+
+    if (a->view_start > 0)
+        canvas_draw_str_aligned(c, 0, (WAVE_TOP + WAVE_BOT) / 2, AlignLeft, AlignCenter, "<");
+    if (a->view_end < a->sd.total_us || a->sd.truncated)
+        canvas_draw_str_aligned(
+            c, SCREEN_W_PX - 1, (WAVE_TOP + WAVE_BOT) / 2, AlignRight, AlignCenter, ">");
 
     char sa[14], sb[14], zb[14], sl[14];
     fmt_time(a->marker_a, sa, sizeof(sa));
