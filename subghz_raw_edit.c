@@ -26,10 +26,22 @@
 #define APP_VERSION "1.3"
 #define APP_REPO "github.com/Lechnio/SubGHz-RAW-Edit"
 
-#define WAVE_TOP 17
-#define WAVE_BOT 50
-#define OV_Y 11
+#define SCREEN_W_PX 128
+#define SCREEN_H_PX 64
+#define FONT_SIZE_PX 7
+#define GAP_PX 1
+
+#define TOP_TEXT_BASE FONT_SIZE_PX
+#define OV_Y (TOP_TEXT_BASE + GAP_PX)
 #define OV_H 5
+#define WAVE_H 32
+#define WAVE_TOP (OV_Y + OV_H + 1)
+#define WAVE_BOT (WAVE_TOP + WAVE_H)
+#define SEP_Y (WAVE_BOT + 1)
+#define LINE1_BASE (SEP_Y + 1 + GAP_PX + FONT_SIZE_PX)
+#define LINE2_BASE (LINE1_BASE + 1 + FONT_SIZE_PX)
+
+static_assert(LINE2_BASE <= SCREEN_H_PX);
 
 #define MENU_SEL_SAVE 0
 #define MENU_SEL_CUT 1
@@ -64,9 +76,9 @@ typedef struct
     int32_t marker_b;
     int active;
 
-    uint16_t activity[128];
+    uint16_t activity[SCREEN_W_PX];
     uint16_t act_max;
-    uint16_t overview[128];
+    uint16_t overview[SCREEN_W_PX];
     uint16_t ov_max;
     bool wave_mode;
 
@@ -123,7 +135,7 @@ static int time_to_x(App *a, int32_t t)
     int32_t span = a->view_end - a->view_start;
     if (span <= 0)
         span = 1;
-    return (int)(((int64_t)(t - a->view_start) * 128) / span);
+    return (int)(((int64_t)(t - a->view_start) * SCREEN_W_PX) / span);
 }
 
 static void clamp_marker(App *a, int idx)
@@ -194,13 +206,18 @@ static void recompute_activity(App *a)
         int32_t s0 = run;
         run += ad;
         int32_t s1 = run;
+
         if (s1 < a->view_start || s0 > a->view_end)
             continue;
-        int x = (int)(((int64_t)(s0 - a->view_start) * 128) / span);
+
+        int x = (int)(((int64_t)(s0 - a->view_start) * SCREEN_W_PX) / span);
+
         if (x < 0)
             x = 0;
-        if (x > 127)
-            x = 127;
+
+        if (x > SCREEN_W_PX - 1)
+            x = SCREEN_W_PX - 1;
+
         if (a->activity[x] < 65535)
             a->activity[x]++;
         if (a->activity[x] > mx)
@@ -222,11 +239,14 @@ static void recompute_overview(App *a)
         int32_t ad = iabs32(a->sd.data[i]);
         int32_t s0 = run;
         run += ad;
-        int x = (int)(((int64_t)s0 * 128) / total);
+        int x = (int)(((int64_t)s0 * SCREEN_W_PX) / total);
+
         if (x < 0)
             x = 0;
-        if (x > 127)
-            x = 127;
+
+        if (x > SCREEN_W_PX - 1)
+            x = SCREEN_W_PX - 1;
+
         if (a->overview[x] < 65535)
             a->overview[x]++;
         if (a->overview[x] > mx)
@@ -731,12 +751,14 @@ static void draw_marker(Canvas *c, int x, bool active)
 {
     if (x < 0)
     {
-        canvas_draw_str(c, 0, WAVE_TOP - 3, "<");
+        canvas_draw_str_aligned(
+            c, 0, (WAVE_TOP + WAVE_BOT) / 2, AlignLeft, AlignCenter, "<");
         return;
     }
-    if (x > 127)
+    if (x > SCREEN_W_PX - 1)
     {
-        canvas_draw_str_aligned(c, 127, WAVE_TOP - 3, AlignRight, AlignTop, ">");
+        canvas_draw_str_aligned(
+            c, SCREEN_W_PX - 1, (WAVE_TOP + WAVE_BOT) / 2, AlignRight, AlignCenter, ">");
         return;
     }
     if (active)
@@ -763,7 +785,7 @@ static void draw_cb(Canvas *c, void *ctx)
 
     if (a->loading)
     {
-        canvas_draw_str_aligned(c, 64, 28, AlignCenter, AlignCenter, "Loading...");
+        canvas_draw_str_aligned(c, SCREEN_H_PX, 28, AlignCenter, AlignCenter, "Loading...");
         char ln[20];
         strncpy(ln, a->basename, sizeof(ln) - 1);
         ln[sizeof(ln) - 1] = '\0';
@@ -772,35 +794,39 @@ static void draw_cb(Canvas *c, void *ctx)
         return;
     }
 
-    char nm[14];
+    char nm[15];
     strncpy(nm, a->basename, sizeof(nm) - 1);
     nm[sizeof(nm) - 1] = '\0';
-    canvas_draw_str(c, 0, 8, nm);
+    canvas_draw_str(c, 0, FONT_SIZE_PX, nm);
 
-    char zb[14];
-    fmt_time(a->view_end - a->view_start, zb, sizeof(zb));
-    canvas_draw_str_aligned(c, 127, 8, AlignRight, AlignBottom, zb);
+    char total_time_str[14];
+    fmt_time(a->sd.total_us, total_time_str, sizeof(total_time_str));
+    canvas_draw_str_aligned(c, SCREEN_W_PX - 1, FONT_SIZE_PX, AlignRight, AlignBottom, total_time_str);
 
-    for (int x = 0; x < 128; x++)
+    for (int x = 0; x < SCREEN_W_PX; x++)
     {
         if (a->overview[x] > a->ov_max / 6)
             canvas_draw_dot(c, x, OV_Y + OV_H - 1);
     }
 
     int32_t total = a->sd.total_us > 0 ? a->sd.total_us : 1;
-    int vx0 = (int)(((int64_t)a->view_start * 128) / total);
-    int vx1 = (int)(((int64_t)a->view_end * 128) / total);
+    int vx0 = (int)(((int64_t)a->view_start * SCREEN_W_PX) / total);
+    int vx1 = (int)(((int64_t)a->view_end * SCREEN_W_PX) / total);
+
     if (vx0 < 0)
         vx0 = 0;
-    if (vx0 > 127)
-        vx0 = 127;
+
+    if (vx0 > SCREEN_W_PX - 1)
+        vx0 = SCREEN_W_PX - 1;
+
     if (vx1 <= vx0)
         vx1 = vx0 + 1;
-    if (vx1 > 127)
-        vx1 = 127;
-    canvas_draw_frame(c, vx0, OV_Y, vx1 - vx0 + 1, OV_H);
 
-    canvas_draw_line(c, 0, WAVE_BOT + 1, 127, WAVE_BOT + 1);
+    if (vx1 > SCREEN_W_PX - 1)
+        vx1 = SCREEN_W_PX - 1;
+
+    canvas_draw_frame(c, vx0, OV_Y, vx1 - vx0 + 1, OV_H);
+    canvas_draw_line(c, 0, SEP_Y, SCREEN_W_PX - 1, SEP_Y);
 
     if (a->wave_mode)
     {
@@ -822,14 +848,16 @@ static void draw_cb(Canvas *c, void *ctx)
 
             int x0 = time_to_x(a, t0);
             int x1 = time_to_x(a, t1);
+
             if (x0 < 0)
                 x0 = 0;
-            if (x1 > 127)
-                x1 = 127;
+
+            if (x1 > SCREEN_W_PX - 1)
+                x1 = SCREEN_W_PX - 1;
 
             int y = (a->sd.data[i] > 0) ? yhi : ylo;
 
-            if (prev_x >= 0 && y != prev_y && x0 >= 0 && x0 <= 127)
+            if (prev_x >= 0 && y != prev_y && x0 >= 0 && x0 <= SCREEN_W_PX - 1)
                 canvas_draw_line(c, x0, yhi, x0, ylo);
 
             if (x1 >= x0)
@@ -841,7 +869,7 @@ static void draw_cb(Canvas *c, void *ctx)
     }
     else
     {
-        for (int x = 0; x < 128; x++)
+        for (int x = 0; x < SCREEN_W_PX; x++)
         {
             if (a->activity[x] == 0)
                 continue;
@@ -856,38 +884,42 @@ static void draw_cb(Canvas *c, void *ctx)
     int xb = time_to_x(a, a->marker_b);
     int xlo = xa < xb ? xa : xb;
     int xhi = xa < xb ? xb : xa;
+
     if (xlo < 0)
         xlo = 0;
-    if (xhi > 127)
-        xhi = 127;
+
+    if (xhi > SCREEN_W_PX - 1)
+        xhi = SCREEN_W_PX - 1;
+
     for (int x = xlo; x <= xhi; x += 2)
         canvas_draw_dot(c, x, WAVE_TOP - 1);
 
     draw_marker(c, time_to_x(a, a->marker_a), a->active == 0);
     draw_marker(c, time_to_x(a, a->marker_b), a->active == 1);
 
-    char sa[14], sb[14], sl[14];
+    char sa[14], sb[14], zb[14], sl[14];
     fmt_time(a->marker_a, sa, sizeof(sa));
     fmt_time(a->marker_b, sb, sizeof(sb));
+
     int32_t len = a->marker_b - a->marker_a;
     if (len < 0)
         len = -len;
+
+    fmt_time(a->view_end - a->view_start, zb, sizeof(zb));
     fmt_time(len, sl, sizeof(sl));
 
-    char l1[40];
-    snprintf(
-        l1,
-        sizeof(l1),
-        "%cA %s  %cB %s",
-        a->active == 0 ? '>' : ' ',
-        sa,
-        a->active == 1 ? '>' : ' ',
-        sb);
-    canvas_draw_str(c, 0, 58, l1);
+    char l1[SCREEN_W_PX / 4];
+    char l2[SCREEN_W_PX / 4];
 
-    char l2[40];
-    snprintf(l2, sizeof(l2), "len %s  OK:A/B  holdOK:menu", sl);
-    canvas_draw_str(c, 0, 64, l2);
+    snprintf(l1, sizeof(l1), "%sA: %s", a->active == 0 ? ">" : "  ", sa);
+    snprintf(l2, sizeof(l2), "%sB: %s", a->active == 1 ? ">" : "  ", sb);
+    canvas_draw_str(c, 0, LINE1_BASE, l1);
+    canvas_draw_str(c, 0, LINE2_BASE, l2);
+
+    snprintf(l1, sizeof(l1), "View: %s", zb);
+    snprintf(l2, sizeof(l2), "Selected: %s", sl);
+    canvas_draw_str_aligned(c, SCREEN_W_PX - 1, 56, AlignRight, AlignBottom, l1);
+    canvas_draw_str_aligned(c, SCREEN_W_PX - 1, 56 + FONT_SIZE_PX + 1, AlignRight, AlignBottom, l2);
 
     if (a->mode != EditModeMenu && a->status[0] && furi_get_tick() < a->status_until)
     {
@@ -1217,7 +1249,7 @@ static void run_editor(Storage *storage, DialogsApp *dialogs)
             else if (e.type == InputTypePress || e.type == InputTypeRepeat)
             {
                 int32_t span = app->view_end - app->view_start;
-                int32_t step = span / 128;
+                int32_t step = span / SCREEN_W_PX;
                 if (step < 1)
                     step = 1;
                 if (e.type == InputTypeRepeat)
@@ -1367,7 +1399,7 @@ static void menu_build_about(Menu *menu)
         menu->widget,
         0,
         0,
-        128,
+        SCREEN_W_PX,
         64,
         "\e#Sub-GHz RAW Edit\e#\n"
         "Version " APP_VERSION "\n"
