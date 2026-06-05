@@ -1,4 +1,4 @@
-https://github.com/user-attachments/assets/0d487587-2b85-4113-94ca-269d1340756f
+https://github.com/user-attachments/assets/16b59c75-5fc2-4f3a-b325-f7fb1d623210
 
 # Sub-GHz .sub RAW Files Editor for Flipper Zero
 
@@ -19,13 +19,13 @@ a long recording full of repeats and noise becomes a single tidy frame.
 Zooming from the full activity envelope all the way down to individual pulses,
 then a trimmed single frame decoding cleanly as the original remote:
 
-| Envelope (zoomed out) | Possible Actions |
-|:---:|:---:|
-| ![envelope](docs/images/01-envelope.png) | ![actions menu](docs/images/02-action-menu.png) |
-
-| Zooming in | Zooming in (deeper) | Square wave (maxium deep) |
+| Envelope (zoomed out) | Signal within AM650 noise | Signal Zoom |
 |:---:|:---:|:---:|
-| ![zooming mid](docs/images/03-zoom-mid.png) | ![zooming in](docs/images/04-zoom-closer.png) | ![waveform](docs/images/05-waveform.png) |
+| ![Envelope](docs/images/01-envelope.png) | ![Signal within noise](docs/images/02-signal-within-noise.png) | ![Signal zoom](docs/images/03-signal-zoom.png) |
+
+| Single signal frame | KeeLoq preambule waveform | Single waveform edge |
+|:---:|:---:|:---:|
+| ![Single signal frame](docs/images/04-single-signal-frame.png) | ![KeeLoq preambule waveform](docs/images/05-keeloq-preambule-waveform.png) | ![Single waveform edge](docs/images/06-single-waveform-edge.png) |
 
 ## Why
 
@@ -67,6 +67,8 @@ visually, on the device.
   "reboot and try again" message instead of a crash.
 - **Clean output.** The saved frame is aligned to start on a pulse and end on a
   gap, with the original `Frequency` and `Preset` preserved.
+
+![GUI diagram](docs/images/07-gui-diagram.png)
 
 ## Controls
 
