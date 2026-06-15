@@ -1371,7 +1371,7 @@ static void draw_cb(Canvas *c, void *ctx)
     canvas_draw_str(c, 0, LINE2_BASE, l2);
 
     snprintf(l1, sizeof(l1), "View: %s", zb);
-    snprintf(l2, sizeof(l2), "Selected: %s", sl);
+    snprintf(l2, sizeof(l2), "Marked: %s", sl);
     canvas_draw_str_aligned(c, SCREEN_W_PX - 1, 56, AlignRight, AlignBottom, l1);
     canvas_draw_str_aligned(c, SCREEN_W_PX - 1, 56 + FONT_SIZE_PX + 1, AlignRight, AlignBottom, l2);
 
