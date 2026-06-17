@@ -14,6 +14,12 @@
 #include <gui/modules/text_input.h>
 #include <gui/modules/variable_item_list.h>
 
+#include <lib/toolbox/level_duration.h>
+#include <lib/flipper_format/flipper_format.h>
+#include <lib/subghz/environment.h>
+#include <lib/subghz/transmitter.h>
+#include <lib/subghz/subghz_protocol_registry.h>
+
 #include "subghz_raw_edit_icons.h"
 
 #include <stdio.h>
@@ -22,10 +28,10 @@
 
 #define SUBGHZ_DIR "/ext/subghz"
 #define MAX_SAMPLES 24000
+#define SYNTH_YIELD_CAP 4096
 #define DUR_CLAMP 32000
 #define LOAD_HEAP_RESERVE 12288
 
-#define MAX_KEY_BYTES 16
 #define GAP_KEEP_MAX_US 1500
 
 #define MERGE_GAP_US 15000
@@ -464,33 +470,6 @@ typedef enum
     SubFormatKeeloq,
 } SubFormat;
 
-static bool is_hex_digit(char c)
-{
-    return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f');
-}
-
-static size_t parse_hex_bytes(const char *s, uint8_t *out, size_t max_bytes)
-{
-    size_t n = 0;
-    while (*s && n < max_bytes)
-    {
-        while (*s == ' ' || *s == '\t')
-            s++;
-
-        if (!s[0] || !s[1])
-            break;
-
-        if (!is_hex_digit(s[0]) || !is_hex_digit(s[1]))
-            break;
-
-        char hex[3] = {s[0], s[1], '\0'};
-        out[n++] = (uint8_t)strtoul(hex, NULL, 16);
-        s += 2;
-    }
-
-    return n;
-}
-
 static void *safe_malloc(size_t size)
 {
     if (size == 0 || memmgr_get_free_heap() < size + LOAD_HEAP_RESERVE)
@@ -507,180 +486,155 @@ static void *safe_realloc(void *ptr, size_t size)
     return realloc(ptr, size);
 }
 
-typedef enum
+/* Decoded protocols are synthesized by the firmware's own SubGhz encoder: the
+ * key file is deserialized into a transmitter and we collect the level/duration
+ * upload it would send on air. Every protocol the firmware supports works with
+ * no per-protocol code here. Rolling codes (KeeLoq, Nice Flor-S, ...) increment
+ * and re-encrypt their counter inside the encoder, so the synthesized frame is
+ * the NEXT counter value, not a byte-for-byte replay; the manufacturer keystores
+ * (system + user) are loaded so that encryption works. */
+
+static SubGhzEnvironment *subghz_env_setup(void)
 {
-    EncPWM = 0,
-    EncManchester,
-} BitEnc;
+    SubGhzEnvironment *env = subghz_environment_alloc();
+    if (!env)
+        return NULL;
 
-/* Physical-layer parameters per protocol. The Key field already holds the raw
- * on-air bits; only timing/shape differs. Verify values against the protocol's
- * SubGhzBlockConst in firmware before adding a row.
- *
- * To add a protocol: append ONE row to PROTOS[] below. Nothing else to touch -
- * load/merge look it up by the Protocol: name. Columns:
- *   name        : must match the Protocol: field in the .sub
- *   enc         : EncPWM or EncManchester
- *   te_short    : base unit, us (PWM short pulse / Manchester half-bit)
- *   te_long     : PWM long pulse, us (ignored for Manchester)
- *   preamble    : leading (te_short,-te_short) pairs; 0 = none
- *   header_gap  : low after preamble, us; 0 = keep last pair's -te_short
- *   guard_us    : sync gap (te_short high + this low). For preamble-less
- *                 protocols it is emitted BOTH before and after the data so a
- *                 single frame is self-delimited and decodes in isolation.
- *   short_is_one: PWM -> short high = bit 1; Manchester -> bit 1 = rising edge
- *   msb_first   : bit order of the Key field (true for most) */
-typedef struct
-{
-    const char *name;
-    BitEnc enc;
-    uint16_t te_short;
-    uint16_t te_long;
-    uint8_t preamble_pairs;
-    uint16_t header_gap;
-    uint16_t guard_us;
-    bool short_is_one;
-    bool msb_first;
-} ProtoParams;
+    subghz_environment_set_protocol_registry(env, (void *)&subghz_protocol_registry);
 
-static const ProtoParams PROTOS[] = {
-    {"KeeLoq", EncPWM, 400, 800, 12, 4000, 1500, true, true},
-    {"Princeton", EncPWM, 390, 1170, 0, 0, 12000, false, true},
-};
+    subghz_environment_set_came_atomo_rainbow_table_file_name(
+        env, "/ext/subghz/assets/came_atomo");
+    subghz_environment_set_alutech_at_4n_rainbow_table_file_name(
+        env, "/ext/subghz/assets/alutech_at_4n");
+    subghz_environment_set_nice_flor_s_rainbow_table_file_name(
+        env, "/ext/subghz/assets/nice_flor_s");
 
-static const ProtoParams *find_proto(const char *name)
-{
-    for (size_t i = 0; i < sizeof(PROTOS) / sizeof(PROTOS[0]); i++)
-        if (strcmp(PROTOS[i].name, name) == 0)
-            return &PROTOS[i];
-
-    return NULL;
+    return env;
 }
 
-static bool key_bit_at(const uint8_t *key, size_t total_bits, uint16_t bit_count, uint16_t b, bool msb_first)
+static bool synth_grow(SubData *sd, size_t need)
 {
-    size_t abs_bit = msb_first ? (total_bits - bit_count + b) : (total_bits - 1 - b);
-    return (key[abs_bit / 8] >> (7 - (abs_bit % 8))) & 1;
-}
+    if (sd->cap >= need)
+        return true;
 
-static bool synthesize_generic(
-    SubData *sd,
-    const ProtoParams *pp,
-    const uint8_t *key,
-    size_t key_len,
-    uint16_t bit_count,
-    uint16_t te_override)
-{
-    if (!pp || key_len == 0 || bit_count == 0 || bit_count > key_len * 8)
+    size_t ncap = sd->cap ? sd->cap : 256;
+    while (ncap < need)
+        ncap *= 2;
+
+    if (ncap > MAX_SAMPLES)
+        ncap = MAX_SAMPLES;
+
+    if (ncap < need)
         return false;
 
-    int32_t te_s = pp->te_short;
-    int32_t te_l = pp->te_long;
-    int32_t guard = pp->guard_us;
-    if (te_override > 0)
+    int16_t *grown = safe_realloc(sd->data, ncap * sizeof(int16_t));
+    if (!grown)
     {
-        te_l = te_l * (int32_t)te_override / te_s;
-        guard = guard * (int32_t)te_override / te_s;
-        te_s = te_override;
+        sd->out_of_memory = true;
+        return false;
     }
 
-    /* Preamble-less protocols (Princeton etc.) sync on the guard gap, so the
-     * data needs a guard on BOTH sides to be decodable as a lone frame. The
-     * leading one is a plain low gap (silence before the signal) - no high
-     * pulse, so it doesn't render as a stub sticking out in front of the data. */
-    bool lead_guard = (pp->preamble_pairs == 0) && (guard > 0);
+    sd->data = grown;
+    sd->cap = ncap;
+    return true;
+}
 
-    size_t needed = ((size_t)pp->preamble_pairs * 2) + ((size_t)bit_count * 2) + 4;
-    if (needed > MAX_SAMPLES)
+static bool synthesize_via_transmitter(
+    Storage *storage, const char *path, const char *protocol, SubData *sd)
+{
+    if (!protocol[0])
         return false;
 
-    if (sd->cap < needed)
+    SubGhzEnvironment *env = subghz_env_setup();
+    if (!env)
+        return false;
+
+    if (strstr(protocol, "KeeLoq"))
     {
-        int16_t *grown = safe_realloc(sd->data, needed * sizeof(int16_t));
-        if (!grown)
+        subghz_environment_load_keystore(env, "/ext/subghz/assets/keeloq_mfcodes");
+        subghz_environment_load_keystore(env, "/ext/subghz/assets/keeloq_mfcodes_user");
+    }
+
+    FlipperFormat *fff = flipper_format_file_alloc(storage);
+    SubGhzTransmitter *tx = NULL;
+    bool ok = false;
+
+    do
+    {
+        if (!flipper_format_file_open_existing(fff, path))
+            break;
+
+        tx = subghz_transmitter_alloc_init(env, protocol);
+        if (!tx)
+            break;
+
+        if (subghz_transmitter_deserialize(tx, fff) != SubGhzProtocolStatusOk)
+            break;
+
+        sd->count = 0;
+        for (;;)
         {
-            sd->out_of_memory = true;
-            return false;
+            LevelDuration ld = subghz_transmitter_yield(tx);
+            if (level_duration_is_reset(ld))
+                break;
+
+            int32_t dur = (int32_t)level_duration_get_duration(ld);
+            int32_t v = level_duration_get_level(ld) ? dur : -dur;
+
+            if (!synth_grow(sd, sd->count + 1))
+            {
+                sd->truncated = true;
+                break;
+            }
+
+            append_sample(sd, v);
+
+            if (sd->count >= SYNTH_YIELD_CAP)
+                break;
         }
 
-        sd->data = grown;
-        sd->cap = needed;
-    }
-
-    sd->count = 0;
-    sd->truncated = false;
-
-    if (lead_guard && !append_sample(sd, -guard))
-        return false;
-
-    for (int i = 0; i < pp->preamble_pairs; i++)
-    {
-        if (!append_sample(sd, te_s) || !append_sample(sd, -te_s))
-            return false;
-    }
-
-    if (pp->preamble_pairs > 0 && pp->header_gap > 0)
-        sd->data[sd->count - 1] = -(int16_t)pp->header_gap;
-
-    size_t total_bits = key_len * 8;
-
-    if (pp->enc == EncManchester)
-    {
-        /* 2 half-bits per data bit; merge adjacent equal levels into one pulse. */
-        int prev = -1;
-        int32_t run = 0;
-        for (uint16_t b = 0; b < bit_count; b++)
+        /* The encoder repeats the same upload `repeat` times. Find the true
+         * period P (smallest P for which the whole buffer is P-periodic - this
+         * rejects the short sub-period of a repetitive preamble like KeeLoq's,
+         * unlike a header-only match) and keep ONE period plus the next frame's
+         * header as its trailing sync. Without this, N duplicates bloat the
+         * buffer and OOM on large frames (e.g. Nice Flor-S). */
+        size_t n = sd->count;
+        for (size_t p = 4; p * 2 <= n; p++)
         {
-            bool one = key_bit_at(key, total_bits, bit_count, b, pp->msb_first);
-            int first = (one == pp->short_is_one) ? 0 : 1;
-            for (int half = 0; half < 2; half++)
+            bool periodic = true;
+            for (size_t i = p; i < n; i++)
             {
-                int lvl = half == 0 ? first : !first;
-                if (lvl == prev)
+                if (sd->data[i] != sd->data[i - p])
                 {
-                    run += te_s;
+                    periodic = false;
+                    break;
                 }
-                else
-                {
-                    if (prev != -1 && !append_sample(sd, prev ? run : -run))
-                        return false;
+            }
 
-                    prev = lvl;
-                    run = te_s;
-                }
+            if (periodic)
+            {
+                /* Keep one period. Append the next frame's first sample as a
+                 * trailing delimiter only when it is a gap (gap-first protocols
+                 * like Dooya/CAME, whose period otherwise ends on a pulse and
+                 * leaves the last bit unframed). Pulse-first protocols (KeeLoq)
+                 * already end the period on their inter-frame guard gap, so
+                 * appending data[p] there would dangle a stray pulse. */
+                sd->count = (sd->data[p] < 0) ? p + 1 : p;
+                break;
             }
         }
 
-        if (prev != -1 && !append_sample(sd, prev ? run : -run))
-            return false;
-    }
-    else
-    {
-        /* PWM. Polarity (short high = bit 1 for KeeLoq) verified vs a native RAW. */
-        int32_t one_hi = pp->short_is_one ? te_s : te_l;
-        int32_t one_lo = pp->short_is_one ? te_l : te_s;
-        int32_t zero_hi = pp->short_is_one ? te_l : te_s;
-        int32_t zero_lo = pp->short_is_one ? te_s : te_l;
+        ok = sd->count > 0;
+    } while (0);
 
-        for (uint16_t b = 0; b < bit_count; b++)
-        {
-            bool is_one = key_bit_at(key, total_bits, bit_count, b, pp->msb_first);
+    if (tx)
+        subghz_transmitter_free(tx);
 
-            if (!append_sample(sd, is_one ? one_hi : zero_hi))
-                return false;
-
-            if (!append_sample(sd, -(is_one ? one_lo : zero_lo)))
-                return false;
-        }
-    }
-
-    if (guard > 0)
-    {
-        if (!append_sample(sd, te_s) || !append_sample(sd, -guard))
-            return false;
-    }
-
-    return true;
+    flipper_format_file_close(fff);
+    flipper_format_free(fff);
+    subghz_environment_free(env);
+    return ok;
 }
 
 /* Snap each pulse to the nearest multiple of a base unit Te, removing timing
@@ -787,8 +741,7 @@ static bool load_sub(Storage *storage, const char *path, SubData *sd)
      * ~4.4-5.4 bytes per sample (number text + sign + space), so fsize/4 is a
      * tight upper bound: well under the old fsize/2 (~2x) over-allocation, yet
      * still above the real count so normal captures aren't truncated. Decoded
-     * files (KeeLoq etc.) are tiny; synthesize_generic grows the buffer if it
-     * needs more. */
+     * files are tiny; synthesize_via_transmitter grows the buffer as it yields. */
     size_t est = (size_t)(fsize / 4) + 64;
     if (est > MAX_SAMPLES)
         est = MAX_SAMPLES;
@@ -805,10 +758,6 @@ static bool load_sub(Storage *storage, const char *path, SubData *sd)
     sd->cap = est;
 
     char protocol[32] = {0};
-    uint16_t bit_count = 0;
-    uint16_t te_val = 0;
-    uint8_t key_bytes[MAX_KEY_BYTES];
-    size_t key_len = 0;
 
     LineReader lr = {.file = f, .len = 0, .pos = 0, .eof = false};
     FuriString *line = furi_string_alloc();
@@ -863,34 +812,14 @@ static bool load_sub(Storage *storage, const char *path, SubData *sd)
             strncpy(protocol, p, sizeof(protocol) - 1);
             protocol[sizeof(protocol) - 1] = '\0';
         }
-        else if (strncmp(s, "Bit:", 4) == 0)
-        {
-            bit_count = (uint16_t)strtoul(s + 4, NULL, 10);
-        }
-        else if (strncmp(s, "TE:", 3) == 0)
-        {
-            te_val = (uint16_t)strtoul(s + 3, NULL, 10);
-        }
-        else if (strncmp(s, "Key:", 4) == 0)
-        {
-            const char *p = s + 4;
-            while (*p == ' ')
-                p++;
-
-            key_len = parse_hex_bytes(p, key_bytes, MAX_KEY_BYTES);
-        }
     }
 
     furi_string_free(line);
     storage_file_close(f);
     storage_file_free(f);
 
-    if (sd->count == 0 && key_len > 0 && bit_count > 0)
-    {
-        const ProtoParams *pp = find_proto(protocol);
-        if (pp)
-            sd->synthesized = synthesize_generic(sd, pp, key_bytes, key_len, bit_count, te_val);
-    }
+    if (sd->count == 0 && protocol[0] && strcmp(protocol, "RAW") != 0)
+        sd->synthesized = synthesize_via_transmitter(storage, path, protocol, sd);
 
     if (sd->data && sd->count > 0 && sd->count < sd->cap)
     {
@@ -969,9 +898,6 @@ static size_t count_sub_samples(
     FuriString *line = furi_string_alloc();
     size_t raw_count = 0;
     char protocol[32] = {0};
-    uint16_t bit_count = 0;
-    uint8_t key_bytes[MAX_KEY_BYTES];
-    size_t key_len = 0;
 
     while (lr_read_line(&lr, line))
     {
@@ -1018,18 +944,6 @@ static size_t count_sub_samples(
             strncpy(protocol, q, sizeof(protocol) - 1);
             protocol[sizeof(protocol) - 1] = '\0';
         }
-        else if (strncmp(s, "Bit:", 4) == 0)
-        {
-            bit_count = (uint16_t)strtoul(s + 4, NULL, 10);
-        }
-        else if (strncmp(s, "Key:", 4) == 0)
-        {
-            const char *q = s + 4;
-            while (*q == ' ')
-                q++;
-
-            key_len = parse_hex_bytes(q, key_bytes, MAX_KEY_BYTES);
-        }
     }
 
     furi_string_free(line);
@@ -1042,14 +956,24 @@ static size_t count_sub_samples(
         return raw_count;
     }
 
-    /* Decoded protocol: predict the synthesized frame length. Must stay in sync
-     * with synthesize_generic (preamble pairs + data-bit pairs + 2-sample guard)
-     * and its validity guard (bit_count <= key_len * 8). */
-    const ProtoParams *pp = find_proto(protocol);
-    if (pp && key_len > 0 && bit_count > 0 && bit_count <= key_len * 8)
+    /* Decoded protocol: the frame length isn't predictable from the file alone,
+     * so synthesize it once via the firmware encoder and count the samples. */
+    if (protocol[0] && strcmp(protocol, "RAW") != 0)
     {
-        *is_raw = false;
-        return (size_t)pp->preamble_pairs * 2 + (size_t)bit_count * 2 + 4;
+        SubData tmp;
+        memset(&tmp, 0, sizeof(tmp));
+        size_t n = 0;
+        if (synthesize_via_transmitter(storage, path, protocol, &tmp))
+            n = tmp.count;
+
+        if (tmp.data)
+            free(tmp.data);
+
+        if (n > 0)
+        {
+            *is_raw = false;
+            return n;
+        }
     }
 
     return 0;
@@ -2428,11 +2352,6 @@ static void menu_build_about(Menu *menu)
         "trims RAW .sub captures\n"
         "down to just the part\n"
         "you care about.\n"
-        "\n"
-        "Supported protocols:\n"
-        "- RAW\n"
-        "- KeeLoq\n"
-        "- Princeton\n"
         "\n"
         "Full documentation available on the GitHub.");
 }
