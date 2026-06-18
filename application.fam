@@ -3,7 +3,7 @@ App(
     name="Sub-GHz RAW Edit",
     apptype=FlipperAppType.EXTERNAL,
     entry_point="subghz_raw_edit_app",
-    stack_size=2 * 1024,
+    stack_size=3 * 1024,
     fap_category="Sub-GHz",
     fap_author="Lechnio",
     fap_weburl="https://github.com/Lechnio/SubGHz-RAW-Edit",
