@@ -890,6 +890,21 @@ static void merge_push(SubData *dst, int32_t v)
     }
 }
 
+/* Insert a clean inter-signal separator so the silence at the join equals
+ * exactly the configured gap. Signals (especially synthesized KeeLoq) end and
+ * start with their own guard silence. Letting merge_push add the gap on top of
+ * it would double (or worse) the visible gap. So we replace the previous
+ * signal's trailing silence with the gap here and the next signal's leading
+ * silence is dropped by the caller when it is appended. */
+static void merge_separator(SubData *dst)
+{
+    int32_t gap = -(g_merge_gap_ms * 1000);
+    if (dst->count > 0 && dst->data[dst->count - 1] < 0)
+        dst->data[dst->count - 1] = (int16_t)gap;
+    else
+        merge_push(dst, gap);
+}
+
 static size_t count_sub_samples(
     Storage *storage,
     const char *path,
@@ -1004,8 +1019,11 @@ static void fill_raw_into(Storage *storage, const char *path, SubData *dst, bool
     LineReader lr = {.file = f, .len = 0, .pos = 0, .eof = false};
     FuriString *line = furi_string_alloc();
 
+    // Drop this signal's own leading silence when it follows a separator, so
+    // the join carries exactly one gap (see merge_separator).
+    bool skip_lead = add_separator;
     if (add_separator)
-        merge_push(dst, -(g_merge_gap_ms * 1000));
+        merge_separator(dst);
 
     while (lr_read_line(&lr, line))
     {
@@ -1027,6 +1045,15 @@ static void fill_raw_into(Storage *storage, const char *path, SubData *dst, bool
                 continue;
             }
             p = end;
+
+            if (skip_lead)
+            {
+                if (v < 0)
+                    continue;
+
+                skip_lead = false;
+            }
+
             merge_push(dst, (int32_t)v);
         }
     }
@@ -1049,11 +1076,24 @@ static void fill_sub_into(
     bool ok = load_sub(storage, path, &tmp);
     if (ok && tmp.data)
     {
+        bool skip_lead = add_separator;
         if (add_separator)
-            merge_push(dst, -(g_merge_gap_ms * 1000));
+            merge_separator(dst);
         for (size_t i = 0; i < tmp.count; i++)
-            merge_push(dst, tmp.data[i]);
+        {
+            int32_t v = tmp.data[i];
+            if (skip_lead)
+            {
+                if (v < 0)
+                    continue;
+
+                skip_lead = false;
+            }
+
+            merge_push(dst, v);
+        }
     }
+
     if (tmp.data)
         free(tmp.data);
 }
@@ -1076,6 +1116,7 @@ static void propose_edit_name(Storage *st, App *a, char *out, size_t outlen)
             break;
         }
     }
+
     furi_string_free(path);
 }
 
