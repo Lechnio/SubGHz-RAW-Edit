@@ -34,7 +34,11 @@
 
 #define GAP_KEEP_MAX_US 1500
 
-#define MERGE_GAP_US 15000
+#define MERGE_GAP_DEFAULT_MS 15
+#define MERGE_GAP_MIN_MS 1
+// Gaps are stored as int16_t and clamped to DUR_CLAMP (32000 us = 32 ms),
+// so anything above 32 ms would just be clamped away.
+#define MERGE_GAP_MAX_MS 32
 #define MERGE_PATH_LEN 128
 #define MERGE_BUF_CHUNK 512
 
@@ -642,6 +646,9 @@ static bool synthesize_via_transmitter(
  * |dur| ~ m*Te; gaps and noise (outside the data window) are left alone. */
 static bool g_normalize_jitter = false;
 
+/* Silence separator inserted between merged signals, in milliseconds. */
+static int32_t g_merge_gap_ms = MERGE_GAP_DEFAULT_MS;
+
 #define JITTER_DATA_MIN_US 60
 #define JITTER_DATA_MAX_US 3000
 #define JITTER_FIT_ITERS 8
@@ -992,7 +999,7 @@ static void fill_raw_into(Storage *storage, const char *path, SubData *dst, bool
     FuriString *line = furi_string_alloc();
 
     if (add_separator)
-        merge_push(dst, -MERGE_GAP_US);
+        merge_push(dst, -(g_merge_gap_ms * 1000));
 
     while (lr_read_line(&lr, line))
     {
@@ -1037,7 +1044,7 @@ static void fill_sub_into(
     if (ok && tmp.data)
     {
         if (add_separator)
-            merge_push(dst, -MERGE_GAP_US);
+            merge_push(dst, -(g_merge_gap_ms * 1000));
         for (size_t i = 0; i < tmp.count; i++)
             merge_push(dst, tmp.data[i]);
     }
@@ -2286,6 +2293,7 @@ typedef enum
     MenuViewSubmenu,
     MenuViewAbout,
     MenuViewConfig,
+    MenuViewGapInput,
 } MenuViewId;
 
 typedef enum
@@ -2309,6 +2317,9 @@ typedef struct
     Submenu *submenu;
     Widget *widget;
     VariableItemList *config_list;
+    TextInput *gap_input;
+    VariableItem *gap_item;
+    char gap_text[8];
     Storage *storage;
     DialogsApp *dialogs;
     MenuAction action;
@@ -2356,12 +2367,70 @@ static void config_norm_changed_cb(VariableItem *item)
     variable_item_set_current_value_text(item, idx ? "ON" : "OFF");
 }
 
+static void config_gap_sync_item(VariableItem *item)
+{
+    char buf[8];
+    snprintf(buf, sizeof(buf), "%ld ms", (long)g_merge_gap_ms);
+    variable_item_set_current_value_index(item, g_merge_gap_ms - MERGE_GAP_MIN_MS);
+    variable_item_set_current_value_text(item, buf);
+}
+
+static void config_gap_changed_cb(VariableItem *item)
+{
+    uint8_t idx = variable_item_get_current_value_index(item);
+    g_merge_gap_ms = MERGE_GAP_MIN_MS + idx;
+    config_gap_sync_item(item);
+}
+
+static void config_gap_input_cb(void *context)
+{
+    Menu *menu = context;
+    int32_t v = atoi(menu->gap_text);
+
+    if (v < MERGE_GAP_MIN_MS)
+        v = MERGE_GAP_MIN_MS;
+    if (v > MERGE_GAP_MAX_MS)
+        v = MERGE_GAP_MAX_MS;
+
+    g_merge_gap_ms = v;
+    config_gap_sync_item(menu->gap_item);
+    view_dispatcher_switch_to_view(menu->view_dispatcher, MenuViewConfig);
+}
+
+static uint32_t config_gap_input_back_cb(void *context)
+{
+    UNUSED(context);
+    return MenuViewConfig;
+}
+
+// OK on a config item: the gap item opens a keyboard for a manual value.
+static void config_enter_cb(void *context, uint32_t index)
+{
+    Menu *menu = context;
+    if (index != 1) // only the "Merge gap" item
+        return;
+
+    snprintf(menu->gap_text, sizeof(menu->gap_text), "%ld", (long)g_merge_gap_ms);
+    text_input_set_header_text(menu->gap_input, "Merge gap [ms] (1-32)");
+    text_input_set_result_callback(
+        menu->gap_input, config_gap_input_cb, menu,
+        menu->gap_text, sizeof(menu->gap_text), false);
+    view_dispatcher_switch_to_view(menu->view_dispatcher, MenuViewGapInput);
+}
+
 static void menu_build_config(Menu *menu)
 {
     VariableItem *it = variable_item_list_add(
         menu->config_list, "Normalize jitter", 2, config_norm_changed_cb, menu);
     variable_item_set_current_value_index(it, g_normalize_jitter ? 1 : 0);
     variable_item_set_current_value_text(it, g_normalize_jitter ? "ON" : "OFF");
+
+    menu->gap_item = variable_item_list_add(
+        menu->config_list, "Merge gap",
+        MERGE_GAP_MAX_MS - MERGE_GAP_MIN_MS + 1, config_gap_changed_cb, menu);
+    config_gap_sync_item(menu->gap_item);
+
+    variable_item_list_set_enter_callback(menu->config_list, config_enter_cb, menu);
 }
 
 static uint32_t submenu_back_cb(void *context)
@@ -2422,6 +2491,7 @@ int32_t subghz_raw_edit_app(void *p)
     menu->submenu = submenu_alloc();
     menu->widget = widget_alloc();
     menu->config_list = variable_item_list_alloc();
+    menu->gap_input = text_input_alloc();
 
     submenu_set_header(menu->submenu, APP_NAME);
     submenu_add_item(menu->submenu, "Select .sub file", MenuItemSelectFile, menu_submenu_cb, menu);
@@ -2436,6 +2506,8 @@ int32_t subghz_raw_edit_app(void *p)
     view_set_previous_callback(widget_get_view(menu->widget), about_back_cb);
     view_set_previous_callback(
         variable_item_list_get_view(menu->config_list), config_back_cb);
+    view_set_previous_callback(
+        text_input_get_view(menu->gap_input), config_gap_input_back_cb);
 
     view_dispatcher_attach_to_gui(menu->view_dispatcher, gui, ViewDispatcherTypeFullscreen);
     view_dispatcher_add_view(
@@ -2443,6 +2515,8 @@ int32_t subghz_raw_edit_app(void *p)
     view_dispatcher_add_view(menu->view_dispatcher, MenuViewAbout, widget_get_view(menu->widget));
     view_dispatcher_add_view(
         menu->view_dispatcher, MenuViewConfig, variable_item_list_get_view(menu->config_list));
+    view_dispatcher_add_view(
+        menu->view_dispatcher, MenuViewGapInput, text_input_get_view(menu->gap_input));
 
     bool running = true;
     while (running)
@@ -2468,9 +2542,11 @@ int32_t subghz_raw_edit_app(void *p)
     view_dispatcher_remove_view(menu->view_dispatcher, MenuViewSubmenu);
     view_dispatcher_remove_view(menu->view_dispatcher, MenuViewAbout);
     view_dispatcher_remove_view(menu->view_dispatcher, MenuViewConfig);
+    view_dispatcher_remove_view(menu->view_dispatcher, MenuViewGapInput);
     submenu_free(menu->submenu);
     widget_free(menu->widget);
     variable_item_list_free(menu->config_list);
+    text_input_free(menu->gap_input);
     view_dispatcher_free(menu->view_dispatcher);
 
     furi_record_close(RECORD_GUI);
