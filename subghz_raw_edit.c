@@ -649,7 +649,9 @@ static bool synthesize_via_transmitter(
  * |dur| ~ m*Te; gaps and noise (outside the data window) are left alone. */
 static bool g_normalize_jitter = false;
 
-/* Silence separator inserted between merged signals, in milliseconds. */
+/* Manual silence separator inserted between independent signals (different
+ * files) during a merge, in milliseconds. Repetitions of the same signal are
+ * separated by the signal's own native gap instead. */
 static int32_t g_merge_gap_ms = MERGE_GAP_DEFAULT_MS;
 
 /* How many times each loaded signal is repeated in the merged output. */
@@ -1007,7 +1009,32 @@ static size_t count_sub_samples(
     return 0;
 }
 
-static void fill_raw_into(Storage *storage, const char *path, SubData *dst, bool add_separator)
+// How a signal being appended is joined to what's already in the buffer.
+typedef enum
+{
+    MergeJoinNone,   // first signal of the whole merge; nothing precedes it
+    MergeJoinManual, // start of a new file: separate with the manual gap
+    MergeJoinNative, // a repetition of the same signal: keep its native gap
+} MergeJoin;
+
+// Prepare the boundary before appending a signal and report whether its own
+// leading silence must be dropped so gaps don't stack into a doubled one.
+//  - Manual join: replace the previous signal's trailing silence with our gap.
+//  - Native join: keep the previous signal's native trailing silence as the gap.
+// In both cases the appended signal's leading silence is dropped.
+static bool merge_prepare_join(SubData *dst, MergeJoin join)
+{
+    if (join == MergeJoinManual)
+    {
+        merge_separator(dst);
+        return true;
+    }
+    if (join == MergeJoinNative && dst->count > 0 && dst->data[dst->count - 1] < 0)
+        return true;
+    return false;
+}
+
+static void fill_raw_into(Storage *storage, const char *path, SubData *dst, MergeJoin join)
 {
     File *f = storage_file_alloc(storage);
     if (!storage_file_open(f, path, FSAM_READ, FSOM_OPEN_EXISTING))
@@ -1019,11 +1046,7 @@ static void fill_raw_into(Storage *storage, const char *path, SubData *dst, bool
     LineReader lr = {.file = f, .len = 0, .pos = 0, .eof = false};
     FuriString *line = furi_string_alloc();
 
-    // Drop this signal's own leading silence when it follows a separator, so
-    // the join carries exactly one gap (see merge_separator).
-    bool skip_lead = add_separator;
-    if (add_separator)
-        merge_separator(dst);
+    bool skip_lead = merge_prepare_join(dst, join);
 
     while (lr_read_line(&lr, line))
     {
@@ -1064,11 +1087,11 @@ static void fill_raw_into(Storage *storage, const char *path, SubData *dst, bool
 }
 
 static void fill_sub_into(
-    Storage *storage, const char *path, SubData *dst, bool is_raw, bool add_separator)
+    Storage *storage, const char *path, SubData *dst, bool is_raw, MergeJoin join)
 {
     if (is_raw)
     {
-        fill_raw_into(storage, path, dst, add_separator);
+        fill_raw_into(storage, path, dst, join);
         return;
     }
 
@@ -1076,9 +1099,7 @@ static void fill_sub_into(
     bool ok = load_sub(storage, path, &tmp);
     if (ok && tmp.data)
     {
-        bool skip_lead = add_separator;
-        if (add_separator)
-            merge_separator(dst);
+        bool skip_lead = merge_prepare_join(dst, join);
         for (size_t i = 0; i < tmp.count; i++)
         {
             int32_t v = tmp.data[i];
@@ -2300,7 +2321,12 @@ static void run_merge(Storage *storage, DialogsApp *dialogs)
         off += plen;
 
         for (int r = 0; r < g_merge_repeat; r++)
-            fill_sub_into(storage, pathbuf, &app->sd, is_raw, (i > 0) || (r > 0));
+        {
+            MergeJoin join = (i == 0 && r == 0) ? MergeJoinNone
+                             : (r == 0)         ? MergeJoinManual
+                                                : MergeJoinNative;
+            fill_sub_into(storage, pathbuf, &app->sd, is_raw, join);
+        }
     }
 
     if (g_normalize_jitter)
@@ -2428,9 +2454,10 @@ typedef enum
 
 static void config_gap_sync_item(VariableItem *item)
 {
+    variable_item_set_current_value_index(item, g_merge_gap_ms - MERGE_GAP_MIN_MS);
+
     char buf[8];
     snprintf(buf, sizeof(buf), "%ld ms", (long)g_merge_gap_ms);
-    variable_item_set_current_value_index(item, g_merge_gap_ms - MERGE_GAP_MIN_MS);
     variable_item_set_current_value_text(item, buf);
 }
 
