@@ -36,9 +36,9 @@
 
 #define MERGE_GAP_DEFAULT_MS 15
 #define MERGE_GAP_MIN_MS 1
-// Gaps are stored as int16_t and clamped to DUR_CLAMP (32000 us = 32 ms),
-// so anything above 32 ms would just be clamped away.
-#define MERGE_GAP_MAX_MS 32
+// A single sample is int16_t clamped to DUR_CLAMP (32000 us = 32 ms), so gaps
+// longer than that are emitted as several consecutive silence samples.
+#define MERGE_GAP_MAX_MS 1000
 #define MERGE_REPEAT_DEFAULT 1
 #define MERGE_REPEAT_MIN 1
 #define MERGE_REPEAT_MAX 64
@@ -244,10 +244,9 @@ static void recompute_activity(App *a)
         if (s1 < a->view_start || s0 > a->view_end)
             continue;
 
-        /* The first sample has no transition before it; when it is a leading gap
-         * (a synthesized frame's leading guard) counting it as an edge paints a
-         * lone 1px bar before the silence. Skip it so the gap reads as blank. */
-        if (i == 0 && a->sd.data[i] < 0)
+        bool transition = (i == 0) ? (a->sd.data[i] > 0)
+                                   : ((a->sd.data[i] < 0) != (a->sd.data[i - 1] < 0));
+        if (!transition)
             continue;
 
         int x = (int)(((int64_t)(s0 - a->view_start) * SCREEN_W_PX) / span);
@@ -264,6 +263,7 @@ static void recompute_activity(App *a)
         if (a->activity[x] > mx)
             mx = a->activity[x];
     }
+
     a->act_max = mx ? mx : 1;
 }
 
@@ -281,6 +281,12 @@ static void recompute_overview(App *a)
         int32_t ad = iabs32(a->sd.data[i]);
         int32_t s0 = run;
         run += ad;
+
+        bool transition = (i == 0) ? (a->sd.data[i] > 0)
+                                   : ((a->sd.data[i] < 0) != (a->sd.data[i - 1] < 0));
+        if (!transition)
+            continue;
+
         int x = (int)(((int64_t)s0 * SCREEN_W_PX) / total);
 
         if (x < 0)
@@ -295,6 +301,7 @@ static void recompute_overview(App *a)
         if (a->overview[x] > mx)
             mx = a->overview[x];
     }
+
     a->ov_max = mx ? mx : 1;
 }
 
@@ -677,6 +684,7 @@ static void normalize_jitter(SubData *sd)
             n_all++;
         }
     }
+
     if (n_all == 0)
         return;
 
@@ -900,11 +908,22 @@ static void merge_push(SubData *dst, int32_t v)
  * silence is dropped by the caller when it is appended. */
 static void merge_separator(SubData *dst)
 {
-    int32_t gap = -(g_merge_gap_ms * 1000);
+    // Absorb the previous signal's trailing silence so the gap isn't added on
+    // top of it, then emit the gap. Since one int16 sample tops out at
+    // DUR_CLAMP, a long gap is written as several consecutive silence samples
+    // (append_sample keeps them separate; merge_push would clamp them into one).
     if (dst->count > 0 && dst->data[dst->count - 1] < 0)
-        dst->data[dst->count - 1] = (int16_t)gap;
-    else
-        merge_push(dst, gap);
+        dst->count--;
+
+    int32_t remaining = g_merge_gap_ms * 1000;
+    while (remaining > 0)
+    {
+        int32_t chunk = remaining > DUR_CLAMP ? DUR_CLAMP : remaining;
+        if (!append_sample(dst, -chunk))
+            break; // output buffer full; stop extending the gap
+
+        remaining -= chunk;
+    }
 }
 
 static size_t count_sub_samples(
@@ -1029,60 +1048,15 @@ static bool merge_prepare_join(SubData *dst, MergeJoin join)
         merge_separator(dst);
         return true;
     }
+
     if (join == MergeJoinNative && dst->count > 0 && dst->data[dst->count - 1] < 0)
         return true;
+
     return false;
 }
 
-static bool load_raw_signal(Storage *storage, const char *path, SubData *out)
+static bool load_signal(Storage *storage, const char *path, SubData *out)
 {
-    File *f = storage_file_alloc(storage);
-    if (!storage_file_open(f, path, FSAM_READ, FSOM_OPEN_EXISTING))
-    {
-        storage_file_free(f);
-        return false;
-    }
-
-    LineReader lr = {.file = f, .len = 0, .pos = 0, .eof = false};
-    FuriString *line = furi_string_alloc();
-
-    while (lr_read_line(&lr, line))
-    {
-        const char *s = furi_string_get_cstr(line);
-        if (strncmp(s, "RAW_Data:", 9) != 0)
-            continue;
-
-        const char *p = s + 9;
-        char *end;
-        while (*p)
-        {
-            long v = strtol(p, &end, 10);
-            if (end == p)
-            {
-                if (*p == '\0')
-                    break;
-
-                p++;
-                continue;
-            }
-            p = end;
-            merge_push(out, (int32_t)v);
-        }
-    }
-
-    furi_string_free(line);
-    storage_file_close(f);
-    storage_file_free(f);
-    return true;
-}
-
-// Load one signal's samples once. RAW files are read verbatim; other files are
-// decoded exactly once, so e.g. a KeeLoq rolling code is not advanced per copy
-// and every repetition is an identical copy of the same decoded frame.
-static bool load_signal(Storage *storage, const char *path, bool is_raw, SubData *out)
-{
-    if (is_raw)
-        return load_raw_signal(storage, path, out);
     return load_sub(storage, path, out);
 }
 
@@ -1535,11 +1509,15 @@ static void draw_cb(Canvas *c, void *ctx)
     draw_marker(c, time_to_x(a, a->marker_b), a->active == 1);
 
     if (a->view_start > 0)
+    {
         canvas_draw_str_aligned(c, 0, (WAVE_TOP + WAVE_BOT) / 2, AlignLeft, AlignCenter, "<");
+    }
 
     if (a->view_end < a->sd.total_us || a->sd.truncated)
+    {
         canvas_draw_str_aligned(
             c, SCREEN_W_PX - 1, (WAVE_TOP + WAVE_BOT) / 2, AlignRight, AlignCenter, ">");
+    }
 
     char sa[14], sb[14], zb[14], sl[14];
     fmt_time(a->marker_a, sa, sizeof(sa));
@@ -1860,6 +1838,7 @@ static void run_editor_session(
                             {
                                 snprintf(app->status, sizeof(app->status), "Nothing to undo");
                             }
+
                             app->status_until = furi_get_tick() + 1500;
                         }
                     }
@@ -2191,9 +2170,12 @@ static void run_merge(Storage *storage, DialogsApp *dialogs)
             continue;
         }
 
+        // Each copy contributes cnt samples. Repetitions reuse the signal's own
+        // native trailing silence (no extra samples), while a new file inserts
+        // the manual gap, which spans several samples once it exceeds DUR_CLAMP.
         size_t copies = (size_t)g_merge_repeat;
-        size_t gaps = (n > 0) ? copies : (copies - 1);
-        size_t extra = cnt * copies + gaps;
+        size_t gap_chunks = (size_t)((g_merge_gap_ms * 1000 + DUR_CLAMP - 1) / DUR_CLAMP);
+        size_t extra = cnt * copies + (n > 0 ? gap_chunks : 0);
         size_t newtotal = total + extra;
         bool over_cap = newtotal > MAX_SAMPLES;
         bool over_ram = newtotal * sizeof(int16_t) + LOAD_HEAP_RESERVE > memmgr_get_free_heap();
@@ -2241,6 +2223,7 @@ static void run_merge(Storage *storage, DialogsApp *dialogs)
                 dialog_message_free(m);
                 break;
             }
+
             pbuf = np;
             pcap = newcap;
         }
@@ -2301,14 +2284,13 @@ static void run_merge(Storage *storage, DialogsApp *dialogs)
     for (int i = 0; i < n; i++)
     {
         uint8_t lb = pbuf[off++];
-        bool is_raw = lb & 0x80;
-        size_t plen = lb & 0x7F;
+        size_t plen = lb & 0x7F; // high bit (RAW flag) no longer needed to load
         memcpy(pathbuf, pbuf + off, plen);
         pathbuf[plen] = '\0';
         off += plen;
 
         SubData sig = {0};
-        if (load_signal(storage, pathbuf, is_raw, &sig) && sig.data)
+        if (load_signal(storage, pathbuf, &sig) && sig.data)
         {
             for (int r = 0; r < g_merge_repeat; r++)
             {
@@ -2448,7 +2430,10 @@ typedef enum
 
 static void config_gap_sync_item(VariableItem *item)
 {
-    variable_item_set_current_value_index(item, g_merge_gap_ms - MERGE_GAP_MIN_MS);
+    // The gap uses a 3-slot stepper (down / hold / up) recentred on every change
+    // so ±1 ms stepping works across the whole 1..1000 range, which is far
+    // beyond a VariableItem's 255-value index limit.
+    variable_item_set_current_value_index(item, 1);
 
     char buf[8];
     snprintf(buf, sizeof(buf), "%ld ms", (long)g_merge_gap_ms);
@@ -2465,7 +2450,12 @@ static void config_repeat_sync_item(VariableItem *item)
 
 static void config_gap_changed_cb(VariableItem *item)
 {
-    g_merge_gap_ms = MERGE_GAP_MIN_MS + variable_item_get_current_value_index(item);
+    uint8_t idx = variable_item_get_current_value_index(item);
+    if (idx == 0 && g_merge_gap_ms > MERGE_GAP_MIN_MS)
+        g_merge_gap_ms--;
+    else if (idx == 2 && g_merge_gap_ms < MERGE_GAP_MAX_MS)
+        g_merge_gap_ms++;
+
     config_gap_sync_item(item);
 }
 
@@ -2486,6 +2476,7 @@ static void config_num_input_cb(void *context)
             v = MERGE_GAP_MIN_MS;
         if (v > MERGE_GAP_MAX_MS)
             v = MERGE_GAP_MAX_MS;
+
         g_merge_gap_ms = v;
         config_gap_sync_item(menu->gap_item);
     }
@@ -2495,6 +2486,7 @@ static void config_num_input_cb(void *context)
             v = MERGE_REPEAT_MIN;
         if (v > MERGE_REPEAT_MAX)
             v = MERGE_REPEAT_MAX;
+
         g_merge_repeat = v;
         config_repeat_sync_item(menu->repeat_item);
     }
@@ -2517,7 +2509,7 @@ static void config_enter_cb(void *context, uint32_t index)
     int32_t current;
     if (index == ConfigItemGap)
     {
-        header = "Merge gap [ms] (1-32)";
+        header = "Merge gap [ms] (1-1000)";
         current = g_merge_gap_ms;
     }
     else if (index == ConfigItemRepeat)
@@ -2547,8 +2539,7 @@ static void menu_build_config(Menu *menu)
     variable_item_set_current_value_text(it, g_normalize_jitter ? "ON" : "OFF");
 
     menu->gap_item = variable_item_list_add(
-        menu->config_list, "Merge gap",
-        MERGE_GAP_MAX_MS - MERGE_GAP_MIN_MS + 1, config_gap_changed_cb, menu);
+        menu->config_list, "Merge gap", 3, config_gap_changed_cb, menu);
     config_gap_sync_item(menu->gap_item);
 
     menu->repeat_item = variable_item_list_add(
