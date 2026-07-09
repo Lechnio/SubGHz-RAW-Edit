@@ -553,6 +553,26 @@ static bool synth_grow(SubData *sd, size_t need)
     return true;
 }
 
+static bool push_duration(SubData *sd, int32_t v)
+{
+    int32_t sign = (v < 0) ? -1 : 1;
+    int32_t mag = iabs32(v);
+
+    do
+    {
+        int32_t chunk = (mag > DUR_CLAMP) ? DUR_CLAMP : mag;
+        if (!synth_grow(sd, sd->count + 1))
+        {
+            sd->truncated = true;
+            return false;
+        }
+        sd->data[sd->count++] = (int16_t)(sign * chunk);
+        mag -= chunk;
+    } while (mag > 0);
+
+    return true;
+}
+
 static bool synthesize_via_transmitter(
     Storage *storage, const char *path, const char *protocol, SubData *sd)
 {
@@ -595,13 +615,8 @@ static bool synthesize_via_transmitter(
             int32_t dur = (int32_t)level_duration_get_duration(ld);
             int32_t v = level_duration_get_level(ld) ? dur : -dur;
 
-            if (!synth_grow(sd, sd->count + 1))
-            {
-                sd->truncated = true;
-                break;
-            }
-
-            append_sample(sd, v);
+            if (!push_duration(sd, v))
+                break; // out of room; keep what we have
 
             if (sd->count >= SYNTH_YIELD_CAP)
                 break;
@@ -806,7 +821,7 @@ static bool load_sub(Storage *storage, const char *path, SubData *sd)
                 }
 
                 p = end;
-                if (!append_sample(sd, (int32_t)v))
+                if (!push_duration(sd, (int32_t)v))
                 {
                     stop = true;
                     break;
@@ -880,30 +895,10 @@ static void recompute_total_us(SubData *sd)
     sd->total_us = (int32_t)run;
 }
 
-static void merge_push(SubData *dst, int32_t v)
-{
-    if (dst->count > 0 && ((dst->data[dst->count - 1] < 0) == (v < 0)))
-    {
-        int32_t merged = (int32_t)dst->data[dst->count - 1] + v;
-
-        if (merged > DUR_CLAMP)
-            merged = DUR_CLAMP;
-
-        if (merged < -DUR_CLAMP)
-            merged = -DUR_CLAMP;
-
-        dst->data[dst->count - 1] = (int16_t)merged;
-    }
-    else
-    {
-        append_sample(dst, v);
-    }
-}
-
 /* Insert a clean inter-signal separator so the silence at the join equals
  * exactly the configured gap. Signals (especially synthesized KeeLoq) end and
- * start with their own guard silence. Letting merge_push add the gap on top of
- * it would double (or worse) the visible gap. So we replace the previous
+ * start with their own guard silence. Adding the gap on top of it would double
+ * (or worse) the visible gap. So we replace the previous
  * signal's trailing silence with the gap here and the next signal's leading
  * silence is dropped by the caller when it is appended. */
 static void merge_separator(SubData *dst)
@@ -911,8 +906,8 @@ static void merge_separator(SubData *dst)
     // Absorb the previous signal's trailing silence so the gap isn't added on
     // top of it, then emit the gap. Since one int16 sample tops out at
     // DUR_CLAMP, a long gap is written as several consecutive silence samples
-    // (append_sample keeps them separate; merge_push would clamp them into one).
-    if (dst->count > 0 && dst->data[dst->count - 1] < 0)
+    // (append_sample keeps them separate; merging would clamp them into one).
+    while (dst->count > 0 && dst->data[dst->count - 1] < 0)
         dst->count--;
 
     int32_t remaining = g_merge_gap_ms * 1000;
@@ -957,7 +952,7 @@ static size_t count_sub_samples(
             char *end;
             while (*p)
             {
-                strtol(p, &end, 10);
+                long v = strtol(p, &end, 10);
                 if (end == p)
                 {
                     if (*p == '\0')
@@ -968,7 +963,11 @@ static size_t count_sub_samples(
                 }
 
                 p = end;
-                raw_count++;
+
+                // Must match load_sub: durations beyond the clamp are split into
+                // several samples, so count ceil(|v| / DUR_CLAMP) here too.
+                int32_t mag = (int32_t)(v < 0 ? -v : v);
+                raw_count += (mag > DUR_CLAMP) ? (size_t)((mag + DUR_CLAMP - 1) / DUR_CLAMP) : 1;
             }
         }
         else if (strncmp(s, "Frequency:", 10) == 0)
@@ -1076,7 +1075,8 @@ static void append_signal(SubData *dst, const SubData *sig, MergeJoin join)
             skip_lead = false;
         }
 
-        merge_push(dst, v);
+        if (!append_sample(dst, v))
+            break;
     }
 }
 
