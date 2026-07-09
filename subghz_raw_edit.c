@@ -1034,19 +1034,17 @@ static bool merge_prepare_join(SubData *dst, MergeJoin join)
     return false;
 }
 
-static void fill_raw_into(Storage *storage, const char *path, SubData *dst, MergeJoin join)
+static bool load_raw_signal(Storage *storage, const char *path, SubData *out)
 {
     File *f = storage_file_alloc(storage);
     if (!storage_file_open(f, path, FSAM_READ, FSOM_OPEN_EXISTING))
     {
         storage_file_free(f);
-        return;
+        return false;
     }
 
     LineReader lr = {.file = f, .len = 0, .pos = 0, .eof = false};
     FuriString *line = furi_string_alloc();
-
-    bool skip_lead = merge_prepare_join(dst, join);
 
     while (lr_read_line(&lr, line))
     {
@@ -1068,55 +1066,44 @@ static void fill_raw_into(Storage *storage, const char *path, SubData *dst, Merg
                 continue;
             }
             p = end;
-
-            if (skip_lead)
-            {
-                if (v < 0)
-                    continue;
-
-                skip_lead = false;
-            }
-
-            merge_push(dst, (int32_t)v);
+            merge_push(out, (int32_t)v);
         }
     }
 
     furi_string_free(line);
     storage_file_close(f);
     storage_file_free(f);
+    return true;
 }
 
-static void fill_sub_into(
-    Storage *storage, const char *path, SubData *dst, bool is_raw, MergeJoin join)
+// Load one signal's samples once. RAW files are read verbatim; other files are
+// decoded exactly once, so e.g. a KeeLoq rolling code is not advanced per copy
+// and every repetition is an identical copy of the same decoded frame.
+static bool load_signal(Storage *storage, const char *path, bool is_raw, SubData *out)
 {
     if (is_raw)
-    {
-        fill_raw_into(storage, path, dst, join);
-        return;
-    }
+        return load_raw_signal(storage, path, out);
+    return load_sub(storage, path, out);
+}
 
-    SubData tmp;
-    bool ok = load_sub(storage, path, &tmp);
-    if (ok && tmp.data)
+// Append a preloaded signal to dst, inserting the appropriate join gap and
+// dropping the signal's own leading silence so gaps don't stack.
+static void append_signal(SubData *dst, const SubData *sig, MergeJoin join)
+{
+    bool skip_lead = merge_prepare_join(dst, join);
+    for (size_t i = 0; i < sig->count; i++)
     {
-        bool skip_lead = merge_prepare_join(dst, join);
-        for (size_t i = 0; i < tmp.count; i++)
+        int32_t v = sig->data[i];
+        if (skip_lead)
         {
-            int32_t v = tmp.data[i];
-            if (skip_lead)
-            {
-                if (v < 0)
-                    continue;
+            if (v < 0)
+                continue;
 
-                skip_lead = false;
-            }
-
-            merge_push(dst, v);
+            skip_lead = false;
         }
-    }
 
-    if (tmp.data)
-        free(tmp.data);
+        merge_push(dst, v);
+    }
 }
 
 static void propose_edit_name(Storage *st, App *a, char *out, size_t outlen)
@@ -2320,13 +2307,20 @@ static void run_merge(Storage *storage, DialogsApp *dialogs)
         pathbuf[plen] = '\0';
         off += plen;
 
-        for (int r = 0; r < g_merge_repeat; r++)
+        SubData sig = {0};
+        if (load_signal(storage, pathbuf, is_raw, &sig) && sig.data)
         {
-            MergeJoin join = (i == 0 && r == 0) ? MergeJoinNone
-                             : (r == 0)         ? MergeJoinManual
-                                                : MergeJoinNative;
-            fill_sub_into(storage, pathbuf, &app->sd, is_raw, join);
+            for (int r = 0; r < g_merge_repeat; r++)
+            {
+                MergeJoin join = (i == 0 && r == 0) ? MergeJoinNone
+                                 : (r == 0)         ? MergeJoinManual
+                                                    : MergeJoinNative;
+                append_signal(&app->sd, &sig, join);
+            }
         }
+
+        if (sig.data)
+            free(sig.data);
     }
 
     if (g_normalize_jitter)
