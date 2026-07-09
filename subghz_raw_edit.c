@@ -1080,6 +1080,50 @@ static void append_signal(SubData *dst, const SubData *sig, MergeJoin join)
     }
 }
 
+static bool load_sub_repeated(Storage *storage, const char *path, SubData *out)
+{
+    SubData sig = {0};
+    bool ok = load_sub(storage, path, &sig);
+    if (!ok || !sig.data || sig.count == 0)
+    {
+        *out = sig; // carries out_of_memory / flags for the caller
+        return ok;
+    }
+
+    // Metadata (frequency, preset, flags) carries over; rebuild the samples.
+    *out = sig;
+    out->data = NULL;
+    out->count = 0;
+    out->cap = 0;
+
+    size_t want = sig.count * (size_t)g_merge_repeat;
+    size_t need = want > MAX_SAMPLES ? MAX_SAMPLES : want;
+    out->data = safe_malloc(need * sizeof(int16_t));
+    if (!out->data)
+    {
+        out->out_of_memory = true;
+        free(sig.data);
+        return false;
+    }
+    out->cap = need;
+    if (want > MAX_SAMPLES)
+        out->truncated = true;
+
+    for (int r = 0; r < g_merge_repeat; r++)
+    {
+        MergeJoin join = (r == 0) ? MergeJoinNone : MergeJoinNative;
+        append_signal(out, &sig, join);
+    }
+
+    int64_t run = 0;
+    for (size_t i = 0; i < out->count; i++)
+        run += iabs32(out->data[i]);
+    out->total_us = (int32_t)(run > 0x7FFFFFFF ? 0x7FFFFFFF : run);
+
+    free(sig.data);
+    return out->count >= 2;
+}
+
 static void propose_edit_name(Storage *st, App *a, char *out, size_t outlen)
 {
     FuriString *path = furi_string_alloc();
@@ -1988,7 +2032,9 @@ static void run_editor(Storage *storage, DialogsApp *dialogs)
     gui_add_view_port(gui, vp, GuiLayerFullscreen);
     view_port_update(vp);
 
-    bool loaded = load_sub(storage, furi_string_get_cstr(path), &app->sd);
+    bool loaded = (g_merge_repeat > 1)
+                      ? load_sub_repeated(storage, furi_string_get_cstr(path), &app->sd)
+                      : load_sub(storage, furi_string_get_cstr(path), &app->sd);
 
     if (app->sd.out_of_memory || !loaded)
     {
@@ -2514,7 +2560,7 @@ static void config_enter_cb(void *context, uint32_t index)
     }
     else if (index == ConfigItemRepeat)
     {
-        header = "Merge repeat each (1-64)";
+        header = "Repeat each (1-64)";
         current = g_merge_repeat;
     }
     else
@@ -2543,7 +2589,7 @@ static void menu_build_config(Menu *menu)
     config_gap_sync_item(menu->gap_item);
 
     menu->repeat_item = variable_item_list_add(
-        menu->config_list, "Merge repeat",
+        menu->config_list, "Repeat",
         MERGE_REPEAT_MAX - MERGE_REPEAT_MIN + 1, config_repeat_changed_cb, menu);
     config_repeat_sync_item(menu->repeat_item);
 
