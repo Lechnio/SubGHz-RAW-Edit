@@ -36,7 +36,7 @@
 #define GAP_KEEP_MAX_US 1500
 
 #define MERGE_GAP_DEFAULT_MS 100
-#define MERGE_GAP_MIN_MS 1
+#define MERGE_GAP_MIN_MS 0
 // A single sample is int16_t clamped to DUR_CLAMP (32000 us = 32 ms), so gaps
 // longer than that are emitted as several consecutive silence samples.
 #define MERGE_GAP_MAX_MS 1000
@@ -946,6 +946,9 @@ static void merge_separator(SubData *dst)
     // Absorb the previous signal's trailing silence so the gap isn't added on
     // top of it, then emit the gap via push_duration (which splits it into
     // several samples when it exceeds the per-sample clamp).
+    if (g_merge_gap_ms == 0)
+        return;
+
     while (dst->count > 0 && dst->data[dst->count - 1] < 0)
         dst->count--;
 
