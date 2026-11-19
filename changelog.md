@@ -1,5 +1,7 @@
 ## v1.10
 
+- *About*: the title is centred vertically in its bar.
+
 ## v1.9
 
 - New *Decode* action: decodes the A..B selection with the firmware's Sub-GHz decoders, groups identical frames and saves the chosen one as a key file.

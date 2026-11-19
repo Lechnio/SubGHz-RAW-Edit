@@ -3524,16 +3524,13 @@ static uint32_t submenu_back_cb(void *context)
 static void menu_build_about(Menu *menu)
 {
     int title_h = FONT_SIZE_PX * 2;
+    static const char title[] = "\e#\e!     Sub-GHz RAW Edit     \e!\n";
+    // The inverted bar is drawn per glyph and moves with the text. A copy 1 px higher extends
+    // the bar up, so the title drawn over it sits 1 px lower and centred in the bar.
     widget_add_text_box_element(
-        menu->widget,
-        0,
-        0,
-        SCREEN_W_PX,
-        title_h,
-        AlignCenter,
-        AlignBottom,
-        "\e#\e!     Sub-GHz RAW Edit     \e!\n",
-        false);
+        menu->widget, 0, 0, SCREEN_W_PX, title_h, AlignCenter, AlignBottom, title, false);
+    widget_add_text_box_element(
+        menu->widget, 0, 1, SCREEN_W_PX, title_h, AlignCenter, AlignBottom, title, false);
 
     int scroll_element_offset = title_h + GAP_PX;
     widget_add_text_scroll_element(
