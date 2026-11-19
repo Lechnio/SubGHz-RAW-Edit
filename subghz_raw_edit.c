@@ -2614,8 +2614,6 @@ static void prompt_and_save(
     else
         propose_edit_name(st, a, namebuf, sizeof(namebuf));
 
-    gui_remove_view_port(gui, vp);
-
     FuriString *path = furi_string_alloc();
     bool write = false;
     snprintf(a->status, sizeof(a->status), "Cancelled");
@@ -2634,7 +2632,6 @@ static void prompt_and_save(
         break;
     }
 
-    gui_add_view_port(gui, vp, GuiLayerFullscreen);
     if (write)
     {
         a->saving = true;
@@ -2764,15 +2761,14 @@ static void do_decode_action(Gui *gui, ViewPort *vp, FuriMessageQueue *queue, St
     dc.text = furi_string_alloc();
     decode_selection(a, &dc);
 
-    a->status_until = 0;
     int32_t save = -1;
     bool locate = false;
     if (dc.n)
     {
-        gui_remove_view_port(gui, vp);
+        // "Decoding..." stays up underneath: picking an entry replays it before showing it
         save = decoded_browse(gui, a, &dc, &locate);
-        gui_add_view_port(gui, vp, GuiLayerFullscreen);
         furi_message_queue_reset(queue);
+        a->status_until = 0;
     }
     else
     {
@@ -2794,7 +2790,7 @@ static void do_decode_action(Gui *gui, ViewPort *vp, FuriMessageQueue *queue, St
     subghz_environment_free(dc.env);
 }
 
-static void do_cut_action(Gui *gui, ViewPort *vp, FuriMessageQueue *queue, DialogsApp *dialogs, App *a)
+static void do_cut_action(Gui *gui, FuriMessageQueue *queue, DialogsApp *dialogs, App *a)
 {
     furi_mutex_acquire(a->mutex, FuriWaitForever);
 
@@ -2817,7 +2813,6 @@ static void do_cut_action(Gui *gui, ViewPort *vp, FuriMessageQueue *queue, Dialo
     if (cut_run(a, false) < 2)
     {
         furi_mutex_release(a->mutex);
-        gui_remove_view_port(gui, vp);
 
         DialogMessage *m = dialog_message_alloc();
         dialog_message_set_header(m, "Cannot cut", 64, 2, AlignCenter, AlignTop);
@@ -2827,7 +2822,6 @@ static void do_cut_action(Gui *gui, ViewPort *vp, FuriMessageQueue *queue, Dialo
         dialog_message_show(dialogs, m);
         dialog_message_free(m);
 
-        gui_add_view_port(gui, vp, GuiLayerFullscreen);
         furi_message_queue_reset(queue);
         return;
     }
@@ -2836,9 +2830,7 @@ static void do_cut_action(Gui *gui, ViewPort *vp, FuriMessageQueue *queue, Dialo
     if (!undo)
     {
         furi_mutex_release(a->mutex);
-        gui_remove_view_port(gui, vp);
         bool go = confirm(gui, "No RAM for Undo.\nCut anyway?");
-        gui_add_view_port(gui, vp, GuiLayerFullscreen);
         furi_message_queue_reset(queue);
         furi_mutex_acquire(a->mutex, FuriWaitForever);
 
@@ -3034,7 +3026,7 @@ static void run_editor_session(
             }
             else if (want_cut)
             {
-                do_cut_action(gui, vp, queue, dialogs, app);
+                do_cut_action(gui, queue, dialogs, app);
             }
 
             view_port_update(vp);
