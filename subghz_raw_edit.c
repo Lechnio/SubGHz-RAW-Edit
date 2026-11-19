@@ -5,6 +5,7 @@
 
 #include <furi.h>
 #include <gui/gui.h>
+#include <gui/elements.h>
 #include <input/input.h>
 #include <storage/storage.h>
 #include <dialogs/dialogs.h>
@@ -39,10 +40,12 @@
 #include <string.h>
 
 #define SUBGHZ_DIR "/ext/subghz"
-#define MAX_SAMPLES 24000
 #define SYNTH_YIELD_CAP 4096
+#define NAME_SCROLL_HOLD_MS 1500
+#define NAME_SCROLL_STEP_MS 300
 #define DUR_CLAMP 32000
-#define LOAD_HEAP_RESERVE 12288
+#define LOAD_HEAP_RESERVE 16384 // Decode (DECODE_HEAP_RESERVE + its list), Save and dialogs
+#define LINE_RESERVE 4096 // Sub-GHz writes up to 512 RAW values (~3.5 KB) per line
 
 #define GAP_KEEP_MAX_US 1500
 
@@ -59,9 +62,16 @@
 #define MERGE_PATH_LEN 128
 #define MERGE_BUF_CHUNK 512
 
-#define APP_VERSION "1.9"
+#define APP_VERSION "1.10"
 #define APP_REPO "github.com/Lechnio/SubGHz-RAW-Edit"
 #define APP_NAME "Sub-GHz RAW Edit"
+
+// Custom buttons and keeping the rolling counter need a custom firmware's SDK
+#ifdef FW_ORIGIN_Official
+#define APP_CUSTOM_FW_FEATURES false
+#else
+#define APP_CUSTOM_FW_FEATURES true
+#endif
 
 #define SCREEN_W_PX 128
 #define SCREEN_H_PX 64
@@ -91,7 +101,7 @@ static_assert(LINE2_BASE <= SCREEN_H_PX);
 #define DECODE_LEAD_MIN_US 2000
 #define DECODE_LEAD_MAX_US DUR_CLAMP
 #define DECODE_LEAD_US 18500
-#define DECODE_HEAP_RESERVE 4096
+#define DECODE_HEAP_RESERVE 10240 // contiguous: the biggest decoder (BinRAW) takes ~8.8 KB
 #define DECODE_KEYS_HEAP 32768
 
 typedef struct
@@ -99,6 +109,7 @@ typedef struct
     int16_t *data;
     size_t count;
     size_t cap;
+    size_t limit; // sample_budget() when loading started
     int32_t total_us;
     uint32_t frequency;
     char preset[48];
@@ -118,6 +129,7 @@ typedef struct
     SubData sd;
     char basename[48];
     bool src_in_dir; // the open file is SUBGHZ_DIR/<basename>.sub
+    uint32_t opened_tick; // a name too long for the top bar scrolls from here
 
     int32_t view_start;
     int32_t view_end;
@@ -529,6 +541,25 @@ static void *safe_realloc(void *ptr, size_t size)
     return realloc(ptr, size);
 }
 
+// Most samples a signal may take: everything above LOAD_HEAP_RESERVE, which Decode and Save run
+// in. The reserve has to stay contiguous too, so it is also kept back from the largest block the
+// samples come out of; the rest of the heap may be only crumbs. Cut works in place and only its
+// Undo copy needs as much again, so a signal too big for that copy is cut without Undo after
+// asking.
+static size_t sample_budget(void)
+{
+    size_t free_heap = memmgr_get_free_heap();
+    size_t block = memmgr_heap_get_max_free_block();
+    if (free_heap <= LOAD_HEAP_RESERVE || block <= LOAD_HEAP_RESERVE)
+        return 0;
+
+    size_t usable = free_heap - LOAD_HEAP_RESERVE;
+    if (usable > block - LOAD_HEAP_RESERVE)
+        usable = block - LOAD_HEAP_RESERVE;
+
+    return usable / sizeof(int16_t);
+}
+
 /* Decoded protocols are synthesized by the firmware's own SubGhz encoder: the
  * key file is deserialized into a transmitter and we collect the level/duration
  * upload it would send on air. Every protocol the firmware supports works with
@@ -565,8 +596,8 @@ static bool synth_grow(SubData *sd, size_t need)
     while (ncap < need)
         ncap *= 2;
 
-    if (ncap > MAX_SAMPLES)
-        ncap = MAX_SAMPLES;
+    if (ncap > sd->limit)
+        ncap = sd->limit;
 
     if (ncap < need)
         return false;
@@ -574,7 +605,9 @@ static bool synth_grow(SubData *sd, size_t need)
     int16_t *grown = safe_realloc(sd->data, ncap * sizeof(int16_t));
     if (!grown)
     {
-        sd->out_of_memory = true;
+        // What is already loaded stays usable, just truncated
+        if (sd->count == 0)
+            sd->out_of_memory = true;
         return false;
     }
 
@@ -1095,14 +1128,21 @@ static bool load_sub(Storage *storage, const char *path, SubData *sd)
     // good first guess that fits normal captures without over-allocating. It is
     // only a hint: push_duration grows the buffer on demand (e.g. when long gaps
     // split into several samples), and decoded files synthesize into it.
+    // The line buffer is sized before the samples take what is left: growing it later, with the
+    // heap nearly full, would have nowhere to go.
+    FuriString *line = furi_string_alloc();
+    furi_string_reserve(line, LINE_RESERVE);
+
+    sd->limit = sample_budget();
     size_t est = (size_t)(fsize / 4) + 64;
-    if (est > MAX_SAMPLES)
-        est = MAX_SAMPLES;
+    if (est > sd->limit)
+        est = sd->limit;
 
     sd->data = safe_malloc(est * sizeof(int16_t));
     if (!sd->data)
     {
         sd->out_of_memory = true;
+        furi_string_free(line);
         storage_file_close(f);
         storage_file_free(f);
         return false;
@@ -1113,7 +1153,6 @@ static bool load_sub(Storage *storage, const char *path, SubData *sd)
     char protocol[32] = {0};
 
     LineReader lr = {.file = f, .len = 0, .pos = 0, .eof = false};
-    FuriString *line = furi_string_alloc();
     bool stop = false;
 
     while (!stop && lr_read_line(&lr, line))
@@ -1315,7 +1354,8 @@ static bool load_sub_repeated(Storage *storage, const char *path, SubData *out)
     out->cap = 0;
 
     size_t want = sig.count * (size_t)g_merge_repeat;
-    size_t need = want > MAX_SAMPLES ? MAX_SAMPLES : want;
+    out->limit = sample_budget();
+    size_t need = want > out->limit ? out->limit : want;
     out->data = safe_malloc(need * sizeof(int16_t));
     if (!out->data)
     {
@@ -1324,7 +1364,7 @@ static bool load_sub_repeated(Storage *storage, const char *path, SubData *out)
         return false;
     }
     out->cap = need;
-    if (want > MAX_SAMPLES)
+    if (want > need)
         out->truncated = true;
 
     for (int r = 0; r < g_merge_repeat; r++)
@@ -1659,7 +1699,7 @@ static void decode_selection(const App *a, DecodeCtx *dc)
         if (!(p->flag & SubGhzProtocolFlag_Decodable) || !p->decoder || !p->decoder->alloc)
             continue;
 
-        if (memmgr_get_free_heap() < DECODE_HEAP_RESERVE)
+        if (memmgr_heap_get_max_free_block() < DECODE_HEAP_RESERVE)
         {
             dc->oom = true;
             break;
@@ -1782,7 +1822,8 @@ static void snapshot_restore(App *a)
     recompute_activity(a);
 }
 
-static bool cut_compact(App *a)
+// Samples left once A..B is cut out; only with apply is the buffer rewritten in place.
+static size_t cut_run(App *a, bool apply)
 {
     int32_t lo = a->marker_a, hi = a->marker_b;
     if (lo > hi)
@@ -1796,6 +1837,7 @@ static bool cut_compact(App *a)
     size_t n = a->sd.count;
     size_t w = 0;
     int32_t run = 0;
+    int32_t last = 0; // d[w - 1], tracked so a dry run needs no writes
     bool seam = false; // true once something was dropped before the current sample
     for (size_t i = 0; i < n; i++)
     {
@@ -1822,34 +1864,51 @@ static bool cut_compact(App *a)
         int32_t val = sign * keep;
         // Merge only across the cut seam. Consecutive same-sign samples elsewhere
         // are long gaps split by push_duration() and must stay as they are.
-        if (seam && w > 0 && ((d[w - 1] >= 0) == (val >= 0)))
+        if (seam && w > 0 && ((last >= 0) == (val >= 0)))
         {
-            int32_t sum = (int32_t)d[w - 1] + val;
+            int32_t sum = last + val;
             if (iabs32(sum) <= DUR_CLAMP)
             {
-                d[w - 1] = (int16_t)sum;
+                last = sum;
+                if (apply)
+                    d[w - 1] = (int16_t)sum;
             }
             else
             {
                 // Keep the full duration: fill the previous sample, spill the rest.
                 // Safe in place: at most one extra sample, written at index <= i.
-                d[w - 1] = (int16_t)(sign * DUR_CLAMP);
-                d[w++] = (int16_t)(sum - sign * DUR_CLAMP);
+                last = sum - sign * DUR_CLAMP;
+                if (apply)
+                {
+                    d[w - 1] = (int16_t)(sign * DUR_CLAMP);
+                    d[w] = (int16_t)last;
+                }
+                w++;
             }
         }
         else
         {
-            d[w++] = (int16_t)val;
+            last = val;
+            if (apply)
+                d[w] = (int16_t)val;
+            w++;
         }
 
         if (keep == ad && s0 >= hi)
             seam = false; // past the cut, back to verbatim copying
     }
 
-    a->sd.count = w;
-    if (w < 2)
-        return true;
+    if (apply)
+        a->sd.count = w;
+    return w;
+}
 
+// Cut A..B out in place; the caller has checked with cut_run() that it leaves a signal.
+static void cut_compact(App *a)
+{
+    int32_t lo = a->marker_a < a->marker_b ? a->marker_a : a->marker_b;
+
+    cut_run(a, true);
     recompute_total_us(&a->sd);
 
     a->marker_a = lo;
@@ -1869,7 +1928,6 @@ static bool cut_compact(App *a)
 
     recompute_overview(a);
     recompute_activity(a);
-    return false;
 }
 
 static void draw_marker(Canvas *c, int x, bool active)
@@ -1918,14 +1976,18 @@ static void draw_cb(Canvas *c, void *ctx)
         return;
     }
 
-    char nm[15];
-    strncpy(nm, a->basename, sizeof(nm) - 1);
-    nm[sizeof(nm) - 1] = '\0';
-    canvas_draw_str(c, 0, FONT_SIZE_PX, nm);
-
     char total_time_str[14];
     fmt_time(a->sd.total_us, total_time_str, sizeof(total_time_str));
     canvas_draw_str_aligned(c, SCREEN_W_PX - 1, FONT_SIZE_PX, AlignRight, AlignBottom, total_time_str);
+
+    // The name gets what the total time leaves, minus a letter to keep them apart; longer ones
+    // scroll after a pause
+    uint32_t elapsed = furi_get_tick() - a->opened_tick;
+    size_t scroll = elapsed < NAME_SCROLL_HOLD_MS ? 0 : 1 + (elapsed - NAME_SCROLL_HOLD_MS) / NAME_SCROLL_STEP_MS;
+    size_t name_w = SCREEN_W_PX - canvas_string_width(c, total_time_str) - canvas_glyph_width(c, 'a') - 4;
+    FuriString *name = furi_string_alloc_set_str(a->basename);
+    elements_scrollable_text_line(c, 0, FONT_SIZE_PX, name_w, name, scroll, false);
+    furi_string_free(name);
 
     for (int x = 0; x < SCREEN_W_PX; x++)
     {
@@ -2424,12 +2486,11 @@ static bool prompt_filename(Gui *gui, char *namebuf, size_t buflen)
     return ok;
 }
 
-static bool confirm_overwrite(Gui *gui)
+static bool confirm(Gui *gui, const char *question)
 {
     PromptCtx pc = {0};
     Widget *w = widget_alloc();
-    widget_add_string_multiline_element(
-        w, 64, 24, AlignCenter, AlignCenter, FontPrimary, "Name exists,\noverwrite?");
+    widget_add_string_multiline_element(w, 64, 24, AlignCenter, AlignCenter, FontPrimary, question);
     widget_add_button_element(w, GuiButtonTypeLeft, "No", button_ok_cb, &pc);
     widget_add_button_element(w, GuiButtonTypeRight, "Yes", button_ok_cb, &pc);
     bool ok = prompt_run(gui, &pc, widget_get_view(w));
@@ -2490,7 +2551,7 @@ static void prompt_and_save(
             write = true;
         else if (a->src_in_dir && strcasecmp(namebuf, a->basename) == 0)
             snprintf(a->status, sizeof(a->status), "Can't overwrite open file");
-        else if (!confirm_overwrite(gui))
+        else if (!confirm(gui, "Name exists,\noverwrite?"))
             continue;
         else
             write = true;
@@ -2597,7 +2658,7 @@ static void do_decode_action(Gui *gui, ViewPort *vp, FuriMessageQueue *queue, St
 
     dc.lead_us = decode_lead_us(a, dc.i0, dc.i1);
 
-    if (memmgr_get_free_heap() < DECODE_HEAP_RESERVE + DECODE_MAX * sizeof(Decoded))
+    if (memmgr_heap_get_max_free_block() < DECODE_HEAP_RESERVE + DECODE_MAX * sizeof(Decoded))
     {
         snprintf(a->status, sizeof(a->status), "Low memory");
         return;
@@ -2663,43 +2724,54 @@ static void do_cut_action(Gui *gui, ViewPort *vp, FuriMessageQueue *queue, Dialo
         return;
     }
 
-    if (!snapshot_take(a))
+    if (cut_run(a, false) < 2)
     {
-        snprintf(a->status, sizeof(a->status), "Low memory, no cut");
-        a->status_until = furi_get_tick() + 1500;
         furi_mutex_release(a->mutex);
+        gui_remove_view_port(gui, vp);
+
+        DialogMessage *m = dialog_message_alloc();
+        dialog_message_set_header(m, "Cannot cut", 64, 2, AlignCenter, AlignTop);
+        dialog_message_set_text(
+            m, "That would leave the\nsignal empty.", 64, 30, AlignCenter, AlignCenter);
+        dialog_message_set_buttons(m, NULL, NULL, "OK");
+        dialog_message_show(dialogs, m);
+        dialog_message_free(m);
+
+        gui_add_view_port(gui, vp, GuiLayerFullscreen);
+        furi_message_queue_reset(queue);
         return;
     }
 
-    bool emptied = cut_compact(a);
-    if (!emptied)
+    bool undo = snapshot_take(a);
+    if (!undo)
     {
-        snprintf(a->status, sizeof(a->status), "Cut");
-        a->status_until = furi_get_tick() + 1200;
         furi_mutex_release(a->mutex);
-        return;
+        gui_remove_view_port(gui, vp);
+        bool go = confirm(gui, "No RAM for Undo.\nCut anyway?");
+        gui_add_view_port(gui, vp, GuiLayerFullscreen);
+        furi_message_queue_reset(queue);
+        furi_mutex_acquire(a->mutex, FuriWaitForever);
+
+        if (!go)
+        {
+            snprintf(a->status, sizeof(a->status), "Cut cancelled");
+            a->status_until = furi_get_tick() + 1500;
+            furi_mutex_release(a->mutex);
+            return;
+        }
+
+        // An older snapshot would undo two cuts at once; dropping it may also free enough
+        // for this one.
+        free(a->undo_data);
+        a->undo_data = NULL;
+        a->has_undo = false;
+        undo = snapshot_take(a);
     }
 
+    cut_compact(a);
+    snprintf(a->status, sizeof(a->status), undo ? "Cut" : "Cut, no Undo");
+    a->status_until = furi_get_tick() + 1200;
     furi_mutex_release(a->mutex);
-
-    gui_remove_view_port(gui, vp);
-
-    DialogMessage *m = dialog_message_alloc();
-    dialog_message_set_header(m, "Cannot cut", 64, 2, AlignCenter, AlignTop);
-    dialog_message_set_text(
-        m, "That would leave the\nsignal empty.", 64, 30, AlignCenter, AlignCenter);
-    dialog_message_set_buttons(m, NULL, NULL, "OK");
-    dialog_message_show(dialogs, m);
-    dialog_message_free(m);
-
-    furi_mutex_acquire(a->mutex, FuriWaitForever);
-    snapshot_restore(a);
-    snprintf(a->status, sizeof(a->status), "Cut cancelled");
-    a->status_until = furi_get_tick() + 1500;
-    furi_mutex_release(a->mutex);
-
-    gui_add_view_port(gui, vp, GuiLayerFullscreen);
-    furi_message_queue_reset(queue);
 }
 
 static void run_editor_session(
@@ -2712,6 +2784,7 @@ static void run_editor_session(
     bool auto_select)
 {
     app->loading = false;
+    app->opened_tick = furi_get_tick();
     if (auto_select)
     {
         auto_detect(app);
@@ -2932,12 +3005,7 @@ static void run_editor(Storage *storage, DialogsApp *dialogs, const char *file)
 
     Gui *gui = furi_record_open(RECORD_GUI);
 
-    if (!btn_select_for_file(gui, storage, furi_string_get_cstr(path)))
-    {
-        furi_record_close(RECORD_GUI);
-        goto cleanup;
-    }
-
+    // Loading screen first: probing the buttons takes a moment and the menu would show meanwhile
     ViewPort *vp = view_port_alloc();
     FuriMessageQueue *queue = furi_message_queue_alloc(8, sizeof(InputEvent));
     view_port_draw_callback_set(vp, draw_cb, app);
@@ -2945,6 +3013,16 @@ static void run_editor(Storage *storage, DialogsApp *dialogs, const char *file)
     app->loading = true;
     gui_add_view_port(gui, vp, GuiLayerFullscreen);
     view_port_update(vp);
+
+    if (!btn_select_for_file(gui, storage, furi_string_get_cstr(path)))
+    {
+        gui_remove_view_port(gui, vp);
+        view_port_free(vp);
+        furi_message_queue_free(queue);
+        furi_record_close(RECORD_GUI);
+        goto cleanup;
+    }
+    furi_message_queue_reset(queue);
 
     bool loaded = (g_merge_repeat > 1)
                       ? load_sub_repeated(storage, furi_string_get_cstr(path), &app->sd)
@@ -2980,6 +3058,26 @@ static void run_editor(Storage *storage, DialogsApp *dialogs, const char *file)
         dialog_message_show(dialogs, m);
         dialog_message_free(m);
         goto cleanup;
+    }
+
+    if (app->sd.truncated)
+    {
+        char msg[96];
+        snprintf(
+            msg,
+            sizeof(msg),
+            "Not enough RAM for all of\nit. Loaded the first\n%u samples (%ld.%ld s).",
+            (unsigned)app->sd.count,
+            (long)(app->sd.total_us / 1000000),
+            (long)(app->sd.total_us / 100000 % 10));
+
+        DialogMessage *m = dialog_message_alloc();
+        dialog_message_set_header(m, "Signal truncated", 64, 2, AlignCenter, AlignTop);
+        dialog_message_set_text(m, msg, 64, 34, AlignCenter, AlignCenter);
+        dialog_message_set_buttons(m, NULL, NULL, "OK");
+        dialog_message_show(dialogs, m);
+        dialog_message_free(m);
+        furi_message_queue_reset(queue);
     }
 
     run_editor_session(gui, vp, queue, storage, dialogs, app, true);
@@ -3138,18 +3236,15 @@ static void run_merge(Storage *storage, DialogsApp *dialogs)
         size_t gap_chunks = duration_samples(g_merge_gap_ms * 1000);
         size_t extra = cnt * copies + (n > 0 ? gap_chunks : 0);
         size_t newtotal = total + extra;
-        bool over_cap = newtotal > MAX_SAMPLES;
-        bool over_ram = newtotal * sizeof(int16_t) + LOAD_HEAP_RESERVE > memmgr_get_free_heap();
-        if (over_cap || over_ram)
+        size_t budget = sample_budget();
+        if (newtotal > budget)
         {
             char msg[128];
-            snprintf(msg, sizeof(msg), "Have %u, +%u.\n%s %d.", (unsigned)total, (unsigned)cnt,
-                     over_cap ? "Limit" : "RAM fits ~",
-                     over_cap ? MAX_SAMPLES : (int)(memmgr_get_free_heap() / sizeof(int16_t)));
+            snprintf(msg, sizeof(msg), "Have %u, +%u.\nRAM fits %u.", (unsigned)total,
+                     (unsigned)extra, (unsigned)budget);
 
             DialogMessage *m = dialog_message_alloc();
-            dialog_message_set_header(
-                m, over_cap ? "Won't fit" : "Out of memory", 64, 2, AlignCenter, AlignTop);
+            dialog_message_set_header(m, "Won't fit", 64, 2, AlignCenter, AlignTop);
             dialog_message_set_text(m, msg, 64, 34, AlignCenter, AlignCenter);
             dialog_message_set_buttons(m, NULL, NULL, "OK");
             dialog_message_show(dialogs, m);
@@ -3512,6 +3607,14 @@ static void menu_build_config(Menu *menu)
         MERGE_REPEAT_MAX - MERGE_REPEAT_MIN + 1, config_repeat_changed_cb, menu);
     config_repeat_sync_item(menu->repeat_item);
 
+    // Fixed by the SDK the app was built with, so set apart under a line
+    const char *state = APP_CUSTOM_FW_FEATURES ? "ON" : "OFF";
+    variable_item_list_add(menu->config_list, "------ Read-only ------", 1, NULL, NULL);
+    it = variable_item_list_add(menu->config_list, "Custom buttons", 1, NULL, NULL);
+    variable_item_set_current_value_text(it, state);
+    it = variable_item_list_add(menu->config_list, "Keep counter", 1, NULL, NULL);
+    variable_item_set_current_value_text(it, state);
+
     variable_item_list_set_enter_callback(menu->config_list, config_enter_cb, menu);
 }
 
@@ -3524,16 +3627,13 @@ static uint32_t submenu_back_cb(void *context)
 static void menu_build_about(Menu *menu)
 {
     int title_h = FONT_SIZE_PX * 2;
+    static const char title[] = "\e#\e!     Sub-GHz RAW Edit     \e!\n";
+    // The inverted bar is drawn per glyph and moves with the text. A copy 1 px higher extends
+    // the bar up, so the title drawn over it sits 1 px lower and centred in the bar.
     widget_add_text_box_element(
-        menu->widget,
-        0,
-        0,
-        SCREEN_W_PX,
-        title_h,
-        AlignCenter,
-        AlignBottom,
-        "\e#\e!     Sub-GHz RAW Edit     \e!\n",
-        false);
+        menu->widget, 0, 0, SCREEN_W_PX, title_h, AlignCenter, AlignBottom, title, false);
+    widget_add_text_box_element(
+        menu->widget, 0, 1, SCREEN_W_PX, title_h, AlignCenter, AlignBottom, title, false);
 
     int scroll_element_offset = title_h + GAP_PX;
     widget_add_text_scroll_element(
