@@ -1,6 +1,7 @@
 ## v1.10
 
 - *About*: the title is centred vertically in its bar.
+- Loading a decoded signal shows the loading screen instead of briefly flashing the main menu before the button picker.
 
 ## v1.9
 
